@@ -5,19 +5,19 @@
 // 目的：把本进程里「匿名 + 可执行」的 VMA 改名成 ART 代码缓存的名字。
 //
 // 只改“名字”，不改权限、不改内容、不改 VMA 数量。
-// 因此对进程行为零影响，但基于“匿名可执行段”的启发式检测会把它们
-// 当成 ART 自己的 jit / data code cache 而跳过。
 //
-// 覆盖对象：
-//   - Zygisk / LSPosed 注入器在进程内匿名映射的 ELF
-//   - 应用自己的 native payload（常见命名 [anon:.bss] 且 r-x，属于异常组合）
-//   - 任何 dev=00:00、inode=0、无路径或 [anon:*] 的可执行段
-//
-// 不碰：file-backed 映射、[vdso]/[vvar]/[stack]、已经叫 ART 缓存名的段。
+// v1.1 设计约束（针对 zygote fork 竞态）：
+//   1) postAppSpecialize 里**不做任何工作**，只创建一个线程。
+//      specialty 窗口内多一毫秒，都可能放大系统的 fork 竞态，
+//      所以这一步只允许 pthread_create。
+//   2) 线程先睡 300ms，等进程 attach 完成、main 已经在跑，再开始扫描。
+//   3) 跳过 usap* / *zygote* 等特殊进程，完全不碰。
+//   4) /data/adb/hide_memory_traces/off 存在时完全不动作（现场开关，无需重启）。
+//   5) 每轮最多改 128 个 VMA，避免极端进程把单轮耗时拉长。
 
 #include <jni.h>
-#include <android/log.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,6 +41,13 @@ namespace {
 constexpr size_t kMiB = 1u << 20;
 constexpr size_t k64KiB = 1u << 16;
 constexpr size_t kMaxNameLen = 64;
+constexpr int kMaxRenamesPerPass = 128;
+
+// 现场开关：文件存在就完全不动手。
+constexpr const char *kOffFile = "/data/adb/hide_memory_traces/off";
+
+// 第一次扫描故意延后，避开 zygote 的 specialization 窗口。
+constexpr long kFirstPassDelayMs = 300;
 
 bool contains_any(const char *haystack, const char *const *needles, size_t count) {
     for (size_t i = 0; i < count; ++i) {
@@ -79,7 +86,44 @@ const char *pick_name(size_t bytes) {
     return "dalvik-data-code-cache";
 }
 
+bool switch_is_off() {
+    return access(kOffFile, F_OK) == 0;
+}
+
+// 读 /proc/self/cmdline 的第一个字段（进程名）。
+bool read_process_name(char *buf, size_t cap) {
+    int fd = open("/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    ssize_t n = read(fd, buf, cap - 1);
+    close(fd);
+    if (n <= 0) {
+        return false;
+    }
+    buf[n] = '\0';
+    return true;
+}
+
+// usap64 / usap32 / xxx_zygote / zygote / zygote64 / webview_zygote 一律不碰。
+bool is_special_process(const char *name) {
+    if (name[0] == '\0') {
+        return false;
+    }
+    if (strncmp(name, "usap", 4) == 0) {
+        return true;
+    }
+    if (strstr(name, "zygote") != nullptr) {
+        return true;
+    }
+    return false;
+}
+
 void rename_pass() {
+    if (switch_is_off()) {
+        return;
+    }
+
     FILE *fp = fopen("/proc/self/maps", "r");
     if (fp == nullptr) {
         return;
@@ -88,8 +132,13 @@ void rename_pass() {
     char *line = nullptr;
     size_t cap = 0;
     ssize_t len = 0;
+    int renamed = 0;
 
     while ((len = getline(&line, &cap, fp)) > 0) {
+        if (renamed >= kMaxRenamesPerPass) {
+            break;                          /* 单轮有上限，绝不做无界循环 */
+        }
+
         unsigned long start = 0;
         unsigned long end = 0;
         unsigned long offset = 0;
@@ -148,6 +197,7 @@ void rename_pass() {
               static_cast<unsigned long>(start),
               static_cast<unsigned long>(bytes),
               static_cast<unsigned long>(reinterpret_cast<uintptr_t>(name)));
+        ++renamed;
     }
 
     free(line);
@@ -164,16 +214,32 @@ void sleep_ms(long ms) {
 }
 
 // 应用自己的 payload 通常在主线程启动后才映射，
-// 所以名字要在前 30 秒内分几次补齐，之后线程退出。
+// 所以名字要在前 40 秒内分几次补齐，之后线程退出。
 void *worker(void *) {
-    static const long kScheduleMs[] = {0, 60, 200, 500, 1200, 2500, 5000, 10000, 20000, 35000};
-    long elapsed = 0;
+    static const long kScheduleMs[] = {
+            300, 700, 1200, 2000, 3500, 6000, 10000, 16000, 25000, 40000,
+    };
+
+    sleep_ms(kFirstPassDelayMs);
+
+    char proc_name[128] = {0};
+    if (!read_process_name(proc_name, sizeof(proc_name))) {
+        return nullptr;
+    }
+    if (is_special_process(proc_name)) {
+        return nullptr;                     /* usap / zygote 一律不碰 */
+    }
+
+    long elapsed = kFirstPassDelayMs;
     for (size_t i = 0; i < sizeof(kScheduleMs) / sizeof(kScheduleMs[0]); ++i) {
         long target = kScheduleMs[i];
         if (target > elapsed) {
             sleep_ms(target - elapsed);
+            elapsed = target;
         }
-        elapsed = target;
+        if (switch_is_off()) {
+            return nullptr;                 /* 现场开关：随时能停 */
+        }
         rename_pass();
     }
     return nullptr;
@@ -189,9 +255,11 @@ public:
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         (void) args;
 
-        /* 先同步跑一遍，覆盖已有的 Zygisk / LSPosed 映射 */
-        rename_pass();
-
+        /*
+         * 这里只创建线程，绝不做任何同步工作。
+         * 该函数运行在 zygote specialization 窗口内，
+         * 窗口里任何额外耗时都会放大系统的 fork 竞态。
+         */
         pthread_t thread;
         if (pthread_create(&thread, nullptr, worker, nullptr) == 0) {
             pthread_detach(thread);
