@@ -13,11 +13,13 @@
 # ================================================================
 
 # 是否启用自定义提交 (true/false)
-custom=false
+custom=true
 
 # ==================== SUSFS 各分支的 commit hash ====================
-# 仅当 custom=true 时生效
-gki-android12-5.10=
+# 仅当 custom=true 时生效；留空表示跟随该分支最新提交
+# 8930474a: 2026-10-29 22:53，2026-10-30 成功构建所用提交
+# 之后的上游改动引入了 priority_uid_filter 编译失败与 selinux_hide 规则外泄，暂不跟进
+gki-android12-5.10=8930474a
 gki-android13-5.15=
 gki-android14-6.1=
 gki-android15-6.6=
