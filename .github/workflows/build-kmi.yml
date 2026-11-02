@@ -82,6 +82,10 @@ on:
         required: false
         type: boolean
         default: false
+      hide_memory_traces:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   prepare-matrix:
@@ -120,4 +124,5 @@ jobs:
       droidspaces: ${{ inputs.droidspaces || 'off' }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
       use_nomount: ${{ inputs.use_nomount || false }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces || false }}
       build_bypass: ${{ inputs.build_bypass || false }}
