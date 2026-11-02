@@ -1,0 +1,58 @@
+name: Build Zygisk Module
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "zygisk-module/**"
+      - ".github/workflows/build-zygisk-module.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build hide_memory_traces
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 安装 NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: 编译
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_HOME:?NDK not found}"
+          rm -rf pkg build-*
+          mkdir -p pkg/zygisk
+
+          for abi in arm64-v8a armeabi-v7a; do
+            echo "== building $abi =="
+            cmake -S zygisk-module -B "build-$abi" \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" \
+              -DANDROID_PLATFORM=android-29 \
+              -DOUTPUT_NAME="$abi"
+            cmake --build "build-$abi" -j"$(nproc)"
+            cp "build-$abi/$abi.so" "pkg/zygisk/$abi.so"
+            file "pkg/zygisk/$abi.so"
+          done
+
+          cp zygisk-module/module/module.prop pkg/
+          cp zygisk-module/module/customize.sh pkg/
+          chmod 0755 pkg/customize.sh
+
+          (cd pkg && zip -r9 ../hide_memory_traces.zip .)
+          unzip -l hide_memory_traces.zip
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: hide_memory_traces
+          path: hide_memory_traces.zip
+          if-no-files-found: error
