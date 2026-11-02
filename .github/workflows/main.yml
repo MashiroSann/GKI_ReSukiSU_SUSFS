@@ -98,6 +98,10 @@ on:
         description: "Enable NoMount mount support (requires the companion module)"
         type: boolean
         default: false
+      hide_memory_traces:
+        description: "Enable hide_memory_traces (5.10 pagemap/smaps view patch)"
+        type: boolean
+        default: false
       cve_2026_43499_patch:
         description: "Apply the CVE-2026-43499 rtmutex patch series"
         type: boolean
@@ -260,6 +264,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces || 'off' }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
       use_nomount: ${{ inputs.use_nomount || false }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces || false }}
       build_bypass: ${{ inputs.build_bypass || false }}
 
   # ==================== Android 12 - 5.10 构建 ====================
@@ -285,6 +290,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       use_nomount: ${{ inputs.use_nomount }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces }}
       build_bypass: ${{ inputs.build_bypass }}
 
   # ==================== Android 13 - 5.10 构建 ====================
@@ -310,6 +316,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       use_nomount: ${{ inputs.use_nomount }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces }}
       build_bypass: ${{ inputs.build_bypass }}
 
   # ==================== Android 13 - 5.15 构建 ====================
@@ -335,6 +342,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       use_nomount: ${{ inputs.use_nomount }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces }}
       build_bypass: ${{ inputs.build_bypass }}
 
   # ==================== Android 14 - 5.15 构建 ====================
@@ -360,6 +368,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       use_nomount: ${{ inputs.use_nomount }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces }}
       build_bypass: ${{ inputs.build_bypass }}
 
   # ==================== Android 14 - 6.1 构建 ====================
@@ -385,6 +394,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       use_nomount: ${{ inputs.use_nomount }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces }}
       build_bypass: ${{ inputs.build_bypass }}
 
   # ==================== Android 15 - 6.6 构建 ====================
@@ -410,6 +420,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       use_nomount: ${{ inputs.use_nomount }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces }}
       build_bypass: ${{ inputs.build_bypass }}
 
   # ==================== Android 16 - 6.12 构建 ====================
@@ -435,6 +446,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       use_nomount: ${{ inputs.use_nomount }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces }}
       build_bypass: ${{ inputs.build_bypass }}
 
   # ==================== Android 17 - 6.18 构建 ====================
@@ -460,6 +472,7 @@ jobs:
       droidspaces: ${{ inputs.droidspaces }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       use_nomount: ${{ inputs.use_nomount }}
+      hide_memory_traces: ${{ inputs.hide_memory_traces }}
       build_bypass: ${{ inputs.build_bypass }}
 
   # ==================== 收集补丁冲突文件 ====================

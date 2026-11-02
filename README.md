@@ -239,6 +239,7 @@ GitHub 的 **Artifacts 下载下来是一个 ZIP**；只解压这一层，里面
 | `droidspaces_ntsync` | `false` | 给 Droidspaces 加 NTSync | 必须先开 Droidspaces。支持 Android 12/5.10、13/5.15、14/6.1、15/6.6、16/6.12；Android 14/5.15 会失败；Android 13/5.10 和 17/6.18 会跳过 |
 | `build_bypass` | `false` | 额外编一个放宽内核模块版本校验的 Image | 会明显增加构建时间；用于诊断模块兼容性，**不是隐藏 root** |
 | `use_nomount` | `false` | NoMount 挂载支持 | 还需要单独安装配套的 [NoMount 模块](https://github.com/maxsteeel/nomount)；clean build 跳过 |
+| `hide_memory_traces` | `false` | 内存观测视图补丁（仅 5.10） | 让 `pagemap` 把只读系统代码页报成文件页、`smaps` 把脏页迁移为 clean。不改内存内容、不改 VMA、不动任何计数器；关闭即完全不生效 |
 | `supp_op` | `false` | 一加 8E（OnePlus 8E）支持 | 主工作流和自定义工作流都有这个开关；6.18 自动跳过 |
 
 > **Android 17 / 6.18 会自动跳过：** SUSFS、ZRAM/LZ4KD、NTSync、Re-Kernel、一加 8E 和 CVE-2026-43499 修复链。BBG 和 Droidspaces 仍可用。构建日志开头的“构建信息摘要”会列出实际启用的功能。
@@ -246,6 +247,22 @@ GitHub 的 **Artifacts 下载下来是一个 ZIP**；只解压这一层，里面
 > **Android 16 / 6.12 的 ZRAM：** 通过 `build_target` 构建 6.12 时，ZRAM 会被强制关闭；6.18 自动跳过。6.12 建议保持关闭。
 
 > **禁用 BakaSU（`disable_bakasu`）：** 只关闭 BakaSU 和 SUSFS。其他可选功能仍按各自的开关生效；`clean_build` 则是连可选功能一起关闭。两者同时勾选时按 `clean_build` 处理。
+
+## 内存观测视图补丁（`hide_memory_traces`）
+
+勾选后，工作流会在 SUSFS 之后调用 `scripts/apply_hide_memory_traces.py`，往 `fs/proc/task_mmu.c` 插入两处改动：
+
+| 位置 | 改动 | 效果 |
+|---|---|---|
+| `pte_to_pagemap_entry()` | 只读系统代码页强制带 `PM_FILE` | `pagemap` 不再把这些页标成私有匿名页，逐页比对型检测器会整页跳过 |
+| `show_smap()` | `Private_Dirty` / `Shared_Dirty` 迁移到对应 `*_Clean`，同步扣减 `Anonymous` | `Rss` 不变，`smaps` 看不到脏页；不破坏任何求和校验 |
+
+判定条件是「文件映射 + 可执行 + 只读挂载」，因此在**没有改动的系统上数值完全不变**（幂等），也不需要白名单。
+
+- **适用范围**：仅 5.10（锚点是 5.10 的 `smap_gather_stats` / `pte_to_pagemap_entry`）。
+- **与 SUSFS / NoMount 的关系**：三个开关正交。SUSFS 的 `SUS_MAP` 在更早的 early-return 就跳过对应 VMA，NoMount 只做 dentry/inode 劫持，都不与本补丁冲突；但本补丁必须在 SUSFS **之后**应用（工作流顺序已保证）。
+- **不做什么**：不改内存内容、不改 VMA 数量、不动 `VmSize`/`statm`/`stat`/`smaps_rollup`；进程直接读自己内存仍然读得到原字节。
+- **关闭**：不勾选即可，内核与打补丁前逐字节等价。
 
 ## 工作流清单
 

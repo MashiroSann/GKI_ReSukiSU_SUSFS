@@ -98,6 +98,10 @@ on:
         required: false
         type: boolean
         default: false
+      hide_memory_traces:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-kernel:
@@ -147,6 +151,7 @@ jobs:
           echo "ZRAM 增强     : ${{ inputs.clean_build != true && inputs.use_zram && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}"
           echo "BBG 补丁      : ${{ inputs.clean_build != true && inputs.use_bbg }}"
           echo "Re-Kernel     : ${{ inputs.clean_build != true && inputs.use_rekernel && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}"
+          echo "内存视图      : ${{ inputs.clean_build != true && inputs.hide_memory_traces && inputs.kernel_version == '5.10' }}"
           echo "CVE-2026-43499: ${{ inputs.clean_build != true && inputs.cve_2026_43499_patch && inputs.kernel_version != '6.18' }}"
           echo "NTSync        : ${{ inputs.clean_build != true && inputs.droidspaces != 'off' && inputs.droidspaces_ntsync && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}"
           echo "NoMount       : ${{ inputs.clean_build != true && inputs.use_nomount }}"
@@ -948,6 +953,24 @@ jobs:
           if ! grep -q '^CONFIG_NOMOUNT=y' "$DEFCONFIG"; then
             echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG"
           fi
+
+      # ==================== hide_memory_traces ====================
+      # 只改 procfs 的输出视图（pagemap 宣告文件页 / smaps 脏页迁移为 clean）。
+      # 不改内存内容、不改 VMA 结构、不新增 Kconfig，也不写 defconfig。
+      # 与 SUSFS / NoMount 正交；必须在 SUSFS 之后应用（本步骤已满足）。
+      - name: 应用 hide_memory_traces 内存视图补丁
+        if: ${{ inputs.clean_build != true && inputs.hide_memory_traces && inputs.kernel_version == '5.10' }}
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/apply_hide_memory_traces.py" .
+
+          if ! grep -q 'hide_memory_traces:begin' fs/proc/task_mmu.c; then
+            echo "::error::hide_memory_traces 补丁未生效"
+            exit 1
+          fi
+          echo "hide_memory_traces 已应用："
+          git --no-pager diff --stat -- fs/proc/task_mmu.c
 
       - name: 集成 Droidspaces 支持
         if: inputs.clean_build != true && inputs.droidspaces != 'off'
