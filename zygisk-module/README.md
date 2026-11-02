@@ -41,10 +41,22 @@ prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, start, len, name);
 ## 现场开关（无需重启）
 
 ```bash
-su -c 'mkdir -p /data/adb/hide_memory_traces && touch /data/adb/hide_memory_traces/off'
+# 关
+su -c 'setprop persist.sys.hmt.off 1'
+# 开
+su -c 'setprop persist.sys.hmt.off 0'
 ```
 
-文件存在 → 所有扫描直接返回，模块等于没装。删掉文件即恢复。**只对之后启动的进程生效**，已在跑的进程需要重开。
+也可以用文件开关（重启后失效、但不动属性）：
+
+```bash
+su -c 'touch /data/local/tmp/hide_memory_traces.off'   # 关
+su -c 'rm -f /data/local/tmp/hide_memory_traces.off'   # 开
+```
+
+任意一个命中 → 所有扫描直接返回，模块等于没装。每轮都会重新检查，随时能停。**只对之后启动的进程生效**，已在跑的进程需要重开。
+
+> 开关放在属性和 `/data/local/tmp` 而不是 `/data/adb`，是因为 `/data/adb` 是 `0700 root`，普通 app 进程根本进不去，读不到开关；属性读取没有 SELinux 限制。
 
 ## 它不做什么
 

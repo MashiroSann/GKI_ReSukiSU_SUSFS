@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -43,8 +44,11 @@ constexpr size_t k64KiB = 1u << 16;
 constexpr size_t kMaxNameLen = 64;
 constexpr int kMaxRenamesPerPass = 128;
 
-// 现场开关：文件存在就完全不动手。
-constexpr const char *kOffFile = "/data/adb/hide_memory_traces/off";
+// 现场开关：属性为 1 或文件存在就完全不动手。
+// 用属性是因为 app 进程读属性没有 SELinux 限制；
+// /data/adb 是 0700，app 根本进不去，所以文件放 /data/local/tmp。
+constexpr const char *kOffProp = "persist.sys.hmt.off";
+constexpr const char *kOffFile = "/data/local/tmp/hide_memory_traces.off";
 
 // 第一次扫描故意延后，避开 zygote 的 specialization 窗口。
 constexpr long kFirstPassDelayMs = 300;
@@ -87,6 +91,10 @@ const char *pick_name(size_t bytes) {
 }
 
 bool switch_is_off() {
+    char value[PROP_VALUE_MAX] = {0};
+    if (__system_property_get(kOffProp, value) > 0 && value[0] == '1') {
+        return true;
+    }
     return access(kOffFile, F_OK) == 0;
 }
 
