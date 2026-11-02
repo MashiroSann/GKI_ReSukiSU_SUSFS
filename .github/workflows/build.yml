@@ -936,6 +936,21 @@ jobs:
       - name: 备份原始 defconfig
         run: cp "$DEFCONFIG" "$DEFCONFIG.orig"
 
+      # 修复上游 SUSFS 回归（aa61fe06 "Make priority_uid_filter as new feature"）：
+      # susfs_switch_to_ksu_domain / susfs_restore_creds 两个静态 helper 的调用点
+      # 被移进 CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER，未启用该特性时会触发
+      # -Wunused-function + -Werror，导致 fs/susfs.o 编译失败。
+      - name: 修复 SUSFS 未使用函数告警
+        if: ${{ inputs.clean_build != true && inputs.enable_susfs }}
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -euo pipefail
+          if [ -f fs/susfs.c ] && grep -q 'susfs_switch_to_ksu_domain' fs/susfs.c \
+             && ! grep -q 'CFLAGS_susfs.o' fs/Makefile; then
+            echo 'CFLAGS_susfs.o += -Wno-unused-function' >> fs/Makefile
+            echo "已为 fs/susfs.o 关闭 -Wunused-function（上游回归临时规避）"
+          fi
+
       - name: 集成 NoMount 挂载元模块
         if: ${{ inputs.clean_build != true && inputs.use_nomount }}
         working-directory: ${{ env.KERNEL_ROOT }}/common
