@@ -349,6 +349,39 @@ void probe_once() {
         total += regions[i].size;
     }
     logmsg("candidates=%d total=%lu", n, (unsigned long) total);
+
+    /* 诊断：r-x 段总数 / 有 map_files 的 / 无 path 的 */
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (fp != nullptr) {
+        char *line = nullptr;
+        size_t cap = 0;
+        ssize_t len;
+        int rx = 0, rx_file = 0, rx_anon = 0;
+        while ((len = getline(&line, &cap, fp)) > 0) {
+            unsigned long s = 0, e = 0, off = 0, ino = 0;
+            char perms[8] = {0}, dev[16] = {0};
+            int po = 0;
+            if (sscanf(line, "%lx-%lx %7s %lx %15s %lu %n",
+                       &s, &e, perms, &off, dev, &ino, &po) < 6) {
+                continue;
+            }
+            if (perms[0] != 'r' || perms[2] != 'x') {
+                continue;
+            }
+            ++rx;
+            if (has_map_file(s, e)) {
+                ++rx_file;
+            } else if (po > 0 && (size_t) po < (size_t) len) {
+                const char *p = line + po;
+                if (*p == '\0' || *p == '\n' || strncmp(p, "[anon", 5) == 0) {
+                    ++rx_anon;
+                }
+            }
+        }
+        free(line);
+        fclose(fp);
+        logmsg("diag rx=%d with_mapfile=%d anon_no_path=%d", rx, rx_file, rx_anon);
+    }
 }
 
 void *worker(void *) {
