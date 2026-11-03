@@ -106,6 +106,23 @@ static bool hmt_report_file(const struct vm_area_struct *vma)
 {{
 	return hmt_is_code_vma(vma) || hmt_fake_memfd(vma);
 }}
+
+/*
+ * 直接打印一条伪 memfd 的 maps 行。
+ *
+ * 为什么不改 show_map_vma 本体：SUSFS 也会往 show_map_vma 里塞一条同样的
+ * show_vma_header_prefix 调用，锚点会撞车。改 show_map 更稳。
+ */
+static void hmt_show_fake_memfd(struct seq_file *m,
+				const struct vm_area_struct *vma)
+{{
+	show_vma_header_prefix(m, vma->vm_start, vma->vm_end,
+			       vma->vm_flags | VM_MAYSHARE, 0,
+			       MKDEV(0, 1), hmt_fake_ino(vma));
+	seq_pad(m, ' ');
+	seq_puts(m, "/memfd:jit-cache (deleted)");
+	seq_putc(m, '\\n');
+}}
 {CORE_END}
 """
 
@@ -162,30 +179,23 @@ static void hmt_adjust_smap(struct vm_area_struct *vma,
 
 # ---------------------------------------------------------------- maps 改写
 MAPS_BRANCH = f"""{MAPS_BEGIN}
-	if (hmt_fake_memfd(vma)) {{
-		/*
-		 * 伪装成已删除的 memfd：dev 00:01、inode 非 0、
-		 * 路径与 Android 13 真实的 ART jit cache 完全同形。
-		 * VM_MAYSHARE 只影响这一行的 'p'/'s' 字符，不改映射语义。
-		 */
-		show_vma_header_prefix(m, start, end, flags | VM_MAYSHARE, 0,
-				       MKDEV(0, 1), hmt_fake_ino(vma));
-		seq_pad(m, ' ');
-		seq_puts(m, "/memfd:jit-cache (deleted)");
-		seq_putc(m, '\\n');
-		return;
+	if (vma_pages(vma)) {{
+		/* 匿名可执行段不交给 show_map_vma，自己打一条 memfd 形态的行 */
+		if (hmt_fake_memfd(vma))
+			hmt_show_fake_memfd(m, vma);
+		else
+			show_map_vma(m, vma);
 	}}
 {MAPS_END}
 """
 
-ANCHOR_CORE = "static void show_vma_header_prefix(struct seq_file *m,"
+# 插在 show_map_vma 定义之前 —— 这时 show_vma_header_prefix 已经定义好了
+ANCHOR_CORE = "static void\nshow_map_vma(struct seq_file *m, struct vm_area_struct *vma)"
 
-# 只锚定 header 打印这一行：
-# 5.10.148+/209+ 是 `end = VMA_PAD_START(vma);`，233 是 `end = vma->vm_end;`，
-# 但 start/end 都已算好，紧邻这一行之前，插在这里两种写法都成立。
-ANCHOR_MAPS = "\tshow_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);"
+# show_map() 里的两行，两个版本都一样，且全文件唯一
+ANCHOR_MAPS = "\tif (vma_pages(vma))\n\t\tshow_map_vma(m, vma);"
 
-ANCHOR_MAPS_PATCHED = MAPS_BRANCH + ANCHOR_MAPS
+ANCHOR_MAPS_PATCHED = MAPS_BRANCH
 
 ANCHOR_HELPERS = "static int show_smap(struct seq_file *m, void *v)"
 
