@@ -180,18 +180,12 @@ MAPS_BRANCH = f"""{MAPS_BEGIN}
 
 ANCHOR_CORE = "static void show_vma_header_prefix(struct seq_file *m,"
 
-ANCHOR_MAPS = (
-    "\tstart = vma->vm_start;\n"
-    "\tend = VMA_PAD_START(vma);\n"
-    "\tshow_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);"
-)
+# 只锚定 header 打印这一行：
+# 5.10.148+/209+ 是 `end = VMA_PAD_START(vma);`，233 是 `end = vma->vm_end;`，
+# 但 start/end 都已算好，紧邻这一行之前，插在这里两种写法都成立。
+ANCHOR_MAPS = "\tshow_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);"
 
-ANCHOR_MAPS_PATCHED = (
-    "\tstart = vma->vm_start;\n"
-    "\tend = VMA_PAD_START(vma);\n"
-    f"{MAPS_BRANCH}"
-    "\tshow_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);"
-)
+ANCHOR_MAPS_PATCHED = MAPS_BRANCH + ANCHOR_MAPS
 
 ANCHOR_HELPERS = "static int show_smap(struct seq_file *m, void *v)"
 
