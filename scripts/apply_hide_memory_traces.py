@@ -93,12 +93,21 @@ static bool hmt_fake_memfd(const struct vm_area_struct *vma)
 }}
 
 /*
- * 伪 inode：同一进程里同一地址恒定，跨进程对同一段继承下来的映射也一致，
- * 看起来就像一个真被 mmap 过的 memfd inode。
+ * 伪 inode：全局常量。
+ *
+ * 之前按 vm_start 算，一个进程里就冒出 8 个不同的 jit-cache inode，
+ * Duck 直接报 "8 distinct inodes, unusual for a single app process"。
+ * 固定成一个值之后，进程里只剩「真实 jit-cache inode + 这一个」，
+ * 语义上也自洽：就像同一份被继承下来的 memfd 有多段窗口。
  */
+#define HMT_FAKE_INO   0x40000UL
+/* ART 的 jit-cache 可执行窗口 pgoff 固定是 32 MB，这里对齐它 */
+#define HMT_EXEC_PGOFF 0x2000000ULL
+
 static unsigned long hmt_fake_ino(const struct vm_area_struct *vma)
 {{
-	return 0x20000UL + ((vma->vm_start >> PAGE_SHIFT) & 0x3ffffUL);
+	(void) vma;
+	return HMT_FAKE_INO;
 }}
 
 /* pagemap：宣告为文件页；比对型检测器依据该位整页跳过 */
@@ -117,7 +126,7 @@ static void hmt_show_fake_memfd(struct seq_file *m,
 				const struct vm_area_struct *vma)
 {{
 	show_vma_header_prefix(m, vma->vm_start, vma->vm_end,
-			       vma->vm_flags | VM_MAYSHARE, 0,
+			       vma->vm_flags | VM_MAYSHARE, HMT_EXEC_PGOFF,
 			       MKDEV(0, 1), hmt_fake_ino(vma));
 	seq_pad(m, ' ');
 	seq_puts(m, "/memfd:jit-cache (deleted)");
