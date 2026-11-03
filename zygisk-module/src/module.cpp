@@ -75,6 +75,7 @@ bool prop_is(const char *name, char what) {
 
 bool debug_on() { return prop_is("persist.sys.hmt.debug", '1'); }
 bool convert_on() { return prop_is("persist.sys.hmt.convert", '1'); }
+bool probe_on() { return prop_is("persist.sys.hmt.probe", '1'); }
 
 void logmsg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void logmsg(const char *fmt, ...) {
@@ -317,6 +318,39 @@ int convert_once() {
     return done;
 }
 
+/*
+ * 只探测：确认本域允许对 memfd 做 PROT_EXEC，并数一下有多少候选段。
+ * 不改任何映射。
+ */
+void probe_once() {
+    int fd = create_memfd();
+    if (fd < 0) {
+        logmsg("memfd_create failed errno=%d", errno);
+        return;
+    }
+    if (ftruncate(fd, (off_t) kPage) != 0) {
+        logmsg("ftruncate failed errno=%d", errno);
+        close(fd);
+        return;
+    }
+    void *p = mmap(nullptr, kPage, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) {
+        logmsg("probe denied errno=%d", errno);
+    } else {
+        logmsg("probe ok");
+        munmap(p, kPage);
+    }
+    close(fd);
+
+    Region regions[kMaxRegions];
+    int n = collect(regions, kMaxRegions);
+    size_t total = 0;
+    for (int i = 0; i < n; ++i) {
+        total += regions[i].size;
+    }
+    logmsg("candidates=%d total=%zu", n, total);
+}
+
 void *worker(void *) {
     sleep_ms(kFirstPassDelayMs);
 
@@ -329,6 +363,9 @@ void *worker(void *) {
         return nullptr;
     }
 
+    logmsg("start pid=%d name=%s convert=%d", (int) getpid(), name,
+           convert_on() ? 1 : 0);
+
     static const long kScheduleMs[] = {
             kFirstPassDelayMs, 1200, 3000, 8000, 20000, 40000,
     };
@@ -340,12 +377,14 @@ void *worker(void *) {
             sleep_ms(target - elapsed);
             elapsed = target;
         }
-        if (!convert_on()) {
-            continue;                    /* 只探测不换载时，仍然什么都不做 */
-        }
-        int done = convert_once();
-        if (done > 0) {
-            break;                       /* 换完就收工 */
+        if (convert_on()) {
+            int done = convert_once();
+            if (done > 0) {
+                break;                   /* 换完就收工 */
+            }
+        } else if (probe_on()) {
+            probe_once();
+            break;                       /* 探测只做一次 */
         }
     }
     return nullptr;
