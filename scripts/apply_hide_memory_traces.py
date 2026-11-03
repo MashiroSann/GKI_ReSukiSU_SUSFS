@@ -196,6 +196,44 @@ static void hmt_fake_memfd_smap(struct mem_size_stats *mss)
 		mss->shared_dirty  = 0;
 	}}
 	mss->anonymous = 0;
+	/*
+	 * 换出页也归零：真实 ART jit-cache 的可执行窗口不会带着一堆换出页
+	 * 出现，留着它反而成了「这段不是 ART 的」的反证。
+	 */
+	mss->swap     = 0;
+	mss->swap_pss = 0;
+}}
+
+/*
+ * smaps_rollup 是逐 VMA 累加到同一个 mss 上的，没法直接对总量调用
+ * hmt_adjust_smap（那样会按最后一段的属性调整全部累计值）。
+ * 这里用「累加前 / 累加后」的差值做增量修正。
+ */
+static void hmt_adjust_smap_delta(struct vm_area_struct *vma,
+				  struct mem_size_stats *mss,
+				  const struct mem_size_stats *before)
+{{
+	unsigned long d;
+
+	if (!hmt_fake_memfd(vma))
+		return;
+
+	d = mss->anonymous - before->anonymous;
+	mss->anonymous -= d;
+
+	d = mss->private_dirty - before->private_dirty;
+	mss->private_dirty -= d;
+	mss->private_clean += d;
+
+	d = mss->shared_dirty - before->shared_dirty;
+	mss->shared_dirty -= d;
+	mss->shared_clean += d;
+
+	d = mss->swap - before->swap;
+	mss->swap -= d;
+
+	d = mss->swap_pss - before->swap_pss;
+	mss->swap_pss -= d;
 }}
 
 /*
@@ -267,15 +305,37 @@ ANCHOR_SMAP_PATCHED = (
     "\tshow_map_vma(m, vma);"
 )
 
-# smaps 的 Name: 行：伪 memfd 不该打印（真 memfd 也没有这一行）
+# smaps 的头部 + Name: 行：
+#   1) 伪 memfd 段的头部也要换成 memfd 形态，否则 smaps 里还是 r-xp 00:00 0，
+#      和 maps 对不上——Duck 就是从这里看出「换出页」的
+#   2) 伪 memfd 不该打印 Name:
 ANCHOR_NAME = (
     "\tshow_map_vma(m, vma);\n"
     "\tif (vma_get_anon_name(vma)) {"
 )
 
 ANCHOR_NAME_PATCHED = (
-    "\tshow_map_vma(m, vma);\n"
+    "\tif (hmt_fake_memfd(vma))\n"
+    "\t\thmt_show_fake_memfd(m, vma);\n"
+    "\telse\n"
+    "\t\tshow_map_vma(m, vma);\n"
     "\tif (!hmt_fake_memfd(vma) && vma_get_anon_name(vma)) {"
+)
+
+# smaps_rollup：逐 VMA 累加，需要做增量修正
+ANCHOR_ROLLUP = (
+    "\tfor (vma = priv->mm->mmap; vma;) {\n"
+    "\t\tsmap_gather_stats(vma, &mss, 0);"
+)
+
+ANCHOR_ROLLUP_PATCHED = (
+    "\tfor (vma = priv->mm->mmap; vma;) {\n"
+    "\t\t{\n"
+    "\t\t\tstruct mem_size_stats _hmt_before = mss;\n"
+    "\n"
+    "\t\t\tsmap_gather_stats(vma, &mss, 0);\n"
+    "\t\t\thmt_adjust_smap_delta(vma, &mss, &_hmt_before);\n"
+    "\t\t}"
 )
 
 ANCHOR_PAGEMAP = (
@@ -336,10 +396,13 @@ def main():
     # 4) smaps 调用点
     src = replace_once(src, ANCHOR_SMAP, ANCHOR_SMAP_PATCHED, "smap_gather_stats/show_map_vma")
 
-    # 5) smaps Name: 行
-    src = replace_once(src, ANCHOR_NAME, ANCHOR_NAME_PATCHED, "smaps Name line")
+    # 5) smaps 头部 + Name: 行
+    src = replace_once(src, ANCHOR_NAME, ANCHOR_NAME_PATCHED, "smaps header/Name line")
 
-    # 6) pagemap
+    # 6) smaps_rollup 增量修正
+    src = replace_once(src, ANCHOR_ROLLUP, ANCHOR_ROLLUP_PATCHED, "smaps_rollup loop")
+
+    # 7) pagemap
     src = replace_once(src, ANCHOR_PAGEMAP, ANCHOR_PAGEMAP_PATCHED, "pagemap PM_FILE")
 
     for marker, expect in ((CORE_BEGIN, 1), (CORE_END, 1),
