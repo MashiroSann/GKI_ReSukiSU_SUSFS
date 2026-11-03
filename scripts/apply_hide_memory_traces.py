@@ -209,7 +209,7 @@ static void hmt_fake_memfd_smap(struct mem_size_stats *mss)
  * hmt_adjust_smap（那样会按最后一段的属性调整全部累计值）。
  * 这里用「累加前 / 累加后」的差值做增量修正。
  */
-static void hmt_adjust_smap_delta(struct vm_area_struct *vma,
+static void __maybe_unused hmt_adjust_smap_delta(struct vm_area_struct *vma,
 				  struct mem_size_stats *mss,
 				  const struct mem_size_stats *before)
 {{
@@ -365,6 +365,18 @@ def replace_once(src, anchor, new, what):
     return src.replace(anchor, new, 1)
 
 
+def replace_optional(src, anchor, new, what):
+    """锚点存在就替换，不存在就跳过（不阻断构建）。"""
+    n = src.count(anchor)
+    if n == 0:
+        print(f"  [!] {what}: anchor not found, skipped")
+        return src
+    if n > 1:
+        fail(f"anchor {what} found {n} time(s), expected 0 or 1")
+    print(f"  [+] {what}: applied")
+    return src.replace(anchor, new, 1)
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     check_only = "--check" in sys.argv
@@ -399,8 +411,8 @@ def main():
     # 5) smaps 头部 + Name: 行
     src = replace_once(src, ANCHOR_NAME, ANCHOR_NAME_PATCHED, "smaps header/Name line")
 
-    # 6) smaps_rollup 增量修正
-    src = replace_once(src, ANCHOR_ROLLUP, ANCHOR_ROLLUP_PATCHED, "smaps_rollup loop")
+    # 6) smaps_rollup 增量修正（源码结构随版本/补丁而异，找不到就跳过）
+    src = replace_optional(src, ANCHOR_ROLLUP, ANCHOR_ROLLUP_PATCHED, "smaps_rollup loop")
 
     # 7) pagemap
     src = replace_once(src, ANCHOR_PAGEMAP, ANCHOR_PAGEMAP_PATCHED, "pagemap PM_FILE")
