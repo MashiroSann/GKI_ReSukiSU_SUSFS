@@ -1,104 +1,103 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// hide_memory_traces (Zygisk module)
+// hide_memory_traces (Zygisk module) v2
 //
-// 目的：把本进程里「匿名 + 可执行」的 VMA 改名成 ART 代码缓存的名字。
+// 目的：把进程里的「匿名 + 可执行」映射换成**真正的 memfd 映射**。
 //
-// 只改“名字”，不改权限、不改内容、不改 VMA 数量。
+// 为什么不再改名：
+//   改名（PR_SET_VMA_ANON_NAME）只改显示名，内核里没有对应 struct file，
+//   检测器只要 open("/proc/pid/map_files/<range>") 就会发现条目不存在
+//   （hunter 的 "Map Files Hiding Detected" 就是这么抓到的）。
 //
-// v1.1 设计约束（针对 zygote fork 竞态）：
-//   1) postAppSpecialize 里**不做任何工作**，只创建一个线程。
-//      specialty 窗口内多一毫秒，都可能放大系统的 fork 竞态，
-//      所以这一步只允许 pthread_create。
-//   2) 线程先睡 300ms，等进程 attach 完成、main 已经在跑，再开始扫描。
-//   3) 跳过 usap* / *zygote* 等特殊进程，完全不碰。
-//   4) /data/adb/hide_memory_traces/off 存在时完全不动作（现场开关，无需重启）。
-//   5) 每轮最多改 128 个 VMA，避免极端进程把单轮耗时拉长。
+//   这里改的是**事实**：内容原样搬进一个 memfd(memfd:jit-cache)，
+//   再用 MAP_SHARED|MAP_FIXED 在同一地址重新映射。换完之后：
+//     - maps 显示 r-xs 00:01 <真 inode> /memfd:jit-cache (deleted)
+//     - /proc/pid/map_files 有条目，可 fstat
+//     - 页内容逐字节相同
+//
+// 一个进程只用一个 memfd，所有被换的段都是它的不同 offset 窗口，
+//   所以进程里 jit-cache 的 inode 只有一个（和真实 ART 一致）。
+//
+// 安全约束：
+//   - 只处理只读可执行段（r-x），绝不碰可写段
+//   - 单个段 > 4 MB、总量 > 8 MB、段数 > 32 一律跳过
+//   - 换载前先在临时地址试映射，失败就整体放弃，不动原映射
+//   - MAP_FIXED 失败时内核不会拆掉原映射
+//
+// 开关：
+//   persist.sys.hmt.convert = 1   才真正执行换载（默认 0，只看不换）
+//   persist.sys.hmt.debug   = 1   向 logcat 打结果（默认 0）
 
 #include <jni.h>
+#include <android/log.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/prctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "zygisk.hpp"
 
-#ifndef PR_SET_VMA
-#define PR_SET_VMA 0x53564d41
-#endif
-#ifndef PR_SET_VMA_ANON_NAME
-#define PR_SET_VMA_ANON_NAME 0
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
 #endif
 
 namespace {
 
-constexpr size_t kMiB = 1u << 20;
-constexpr size_t k64KiB = 1u << 16;
-constexpr size_t kMaxNameLen = 64;
-constexpr int kMaxRenamesPerPass = 128;
+constexpr size_t kPage = 4096;
+constexpr size_t kMaxRegion = 4u << 20;      /* 单段上限 4 MB */
+constexpr size_t kMaxTotal = 8u << 20;       /* 单进程上限 8 MB */
+constexpr int kMaxRegions = 32;
+constexpr long kFirstPassDelayMs = 400;
 
-// 现场开关：属性为 1 或文件存在就完全不动手。
-// 用属性是因为 app 进程读属性没有 SELinux 限制；
-// /data/adb 是 0700，app 根本进不去，所以文件放 /data/local/tmp。
-constexpr const char *kOffProp = "persist.sys.hmt.off";
-constexpr const char *kOffFile = "/data/local/tmp/hide_memory_traces.off";
+struct Region {
+    uintptr_t start;
+    size_t size;
+    off_t moff;          /* 该段在 memfd 里的偏移 */
+};
 
-// 第一次扫描故意延后，避开 zygote 的 specialization 窗口。
-constexpr long kFirstPassDelayMs = 300;
-
-bool contains_any(const char *haystack, const char *const *needles, size_t count) {
-    for (size_t i = 0; i < count; ++i) {
-        if (strstr(haystack, needles[i]) != nullptr) {
-            return true;
-        }
+bool prop_is(const char *name, char what) {
+    char v[PROP_VALUE_MAX] = {0};
+    if (__system_property_get(name, v) <= 0) {
+        return false;
     }
-    return false;
+    return v[0] == what;
 }
 
-// 已经是 ART 代码缓存名就不再处理，避免重复改名与覆盖 ART 自己的命名。
-bool already_art_cache(const char *path) {
-    static const char *const kNames[] = {
-            "dalvik-jit-code-cache",
-            "dalvik-data-code-cache",
-            "dalvik-zygote-jit-code-cache",
-            "dalvik-zygote-data-code-cache",
-            "jit-code-cache",
-            "jit-cache",
-            "jit-zygote-cache",
-            "zygote-jit-code-cache",
-            "data-code-cache",
-            "zygote-data-code-cache",
-    };
-    return contains_any(path, kNames, sizeof(kNames) / sizeof(kNames[0]));
+bool debug_on() { return prop_is("persist.sys.hmt.debug", '1'); }
+bool convert_on() { return prop_is("persist.sys.hmt.convert", '1'); }
+
+void logmsg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void logmsg(const char *fmt, ...) {
+    if (!debug_on()) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    __android_log_vprint(ANDROID_LOG_INFO, "hmt", fmt, ap);
+    va_end(ap);
 }
 
-// 名字要与大小档位匹配，避免“4 KB 的 jit-code-cache”这种不自然组合。
-const char *pick_name(size_t bytes) {
-    if (bytes >= kMiB) {
-        return "dalvik-jit-code-cache";
+void sleep_ms(long ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
     }
-    if (bytes >= k64KiB) {
-        return "jit-code-cache";
-    }
-    return "dalvik-data-code-cache";
 }
 
-bool switch_is_off() {
-    char value[PROP_VALUE_MAX] = {0};
-    if (__system_property_get(kOffProp, value) > 0 && value[0] == '1') {
-        return true;
-    }
-    return access(kOffFile, F_OK) == 0;
-}
-
-// 读 /proc/self/cmdline 的第一个字段（进程名）。
+/*
+ * 读 /proc/self/cmdline 第一个字段。
+ */
 bool read_process_name(char *buf, size_t cap) {
     int fd = open("/proc/self/cmdline", O_RDONLY);
     if (fd < 0) {
@@ -113,44 +112,49 @@ bool read_process_name(char *buf, size_t cap) {
     return true;
 }
 
-// usap64 / usap32 / xxx_zygote / zygote / zygote64 / webview_zygote 一律不碰。
-bool is_special_process(const char *name) {
-    if (name[0] == '\0') {
-        return false;
-    }
-    if (strncmp(name, "usap", 4) == 0) {
-        return true;
-    }
-    if (strstr(name, "zygote") != nullptr) {
-        return true;
+/*
+ * 是否是「真文件映射」——直接看 map_files 有没有对应条目。
+ * 这比解析名字可靠：内核补丁伪造的 memfd 名字也没有条目。
+ */
+bool has_map_file(uintptr_t start, uintptr_t end) {
+    char path[80];
+    snprintf(path, sizeof(path), "/proc/self/map_files/%lx-%lx",
+             (unsigned long) start, (unsigned long) end);
+    struct stat st;
+    /* stat 走链接解析：有条目且指向真实文件才成功 */
+    return stat(path, &st) == 0;
+}
+
+bool is_excluded_name(const char *path, size_t len) {
+    static const char *const kNames[] = {
+            "[vdso]", "[vvar]", "[vsyscall]", "[stack]", "[heap]",
+    };
+    for (const char *n : kNames) {
+        size_t nl = strlen(n);
+        if (len >= nl && strncmp(path, n, nl) == 0) {
+            return true;
+        }
     }
     return false;
 }
 
-void rename_pass() {
-    if (switch_is_off()) {
-        return;
-    }
-
+/*
+ * 扫描候选段：r-x、无真文件 backing、不是栈/堆/vdso、尺寸合规。
+ */
+int collect(Region *out, int max) {
     FILE *fp = fopen("/proc/self/maps", "r");
     if (fp == nullptr) {
-        return;
+        return 0;
     }
 
     char *line = nullptr;
     size_t cap = 0;
     ssize_t len = 0;
-    int renamed = 0;
+    int n = 0;
+    size_t total = 0;
 
-    while ((len = getline(&line, &cap, fp)) > 0) {
-        if (renamed >= kMaxRenamesPerPass) {
-            break;                          /* 单轮有上限，绝不做无界循环 */
-        }
-
-        unsigned long start = 0;
-        unsigned long end = 0;
-        unsigned long offset = 0;
-        unsigned long inode = 0;
+    while ((len = getline(&line, &cap, fp)) > 0 && n < max) {
+        unsigned long start = 0, end = 0, offset = 0, inode = 0;
         char perms[8] = {0};
         char dev[16] = {0};
         int path_off = 0;
@@ -160,95 +164,189 @@ void rename_pass() {
         if (parsed < 6) {
             continue;
         }
-        if (perms[2] != 'x') {
-            continue;                       /* 只看可执行段 */
-        }
-        if (strcmp(dev, "00:00") != 0) {
-            continue;                       /* 只看匿名段 */
-        }
-        if (inode != 0) {
+
+        /* 只要只读可执行：有 r 有 x，没有 w */
+        if (perms[0] != 'r' || perms[2] != 'x' || perms[1] == 'w') {
             continue;
         }
 
         const char *path = "";
-        if (path_off > 0 && path_off < len) {
+        size_t path_len = 0;
+        if (path_off > 0 && (size_t) path_off < (size_t) len) {
             path = line + path_off;
-            /* 去掉行尾换行，strstr 比较更干净 */
-            char *nl = strchr(const_cast<char *>(path), '\n');
-            if (nl != nullptr) {
-                *nl = '\0';
-            }
+            const char *nl = strchr(path, '\n');
+            path_len = nl ? (size_t) (nl - path) : strlen(path);
         }
 
-        if (path[0] == '/') {
-            continue;                       /* file-backed */
-        }
-        if (path[0] == '[' && strncmp(path, "[anon", 5) != 0) {
-            continue;                       /* [vdso] / [vvar] / [stack] 等 */
-        }
-        if (already_art_cache(path)) {
+        if (is_excluded_name(path, path_len)) {
             continue;
         }
 
-        size_t bytes = end > start ? static_cast<size_t>(end - start) : 0;
-        if (bytes == 0) {
+        /* 有真文件就直接跳过（ART 自己的 memfd jit cache 也是这种） */
+        if (has_map_file(start, end)) {
             continue;
         }
 
-        const char *name = pick_name(bytes);
-        if (strlen(name) > kMaxNameLen) {
+        size_t size = end > start ? (size_t) (end - start) : 0;
+        if (size == 0 || size > kMaxRegion) {
             continue;
         }
+        if (total + size > kMaxTotal) {
+            break;
+        }
 
-        /* 失败无所谓：可能刚好被 munmap，或内核不支持 ANON_VMA_NAME */
-        prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME,
-              static_cast<unsigned long>(start),
-              static_cast<unsigned long>(bytes),
-              static_cast<unsigned long>(reinterpret_cast<uintptr_t>(name)));
-        ++renamed;
+        out[n].start = start;
+        out[n].size = size;
+        out[n].moff = 0;
+        total += size;
+        ++n;
     }
 
     free(line);
     fclose(fp);
+    return n;
 }
 
-void sleep_ms(long ms) {
-    struct timespec ts;
-    ts.tv_sec = ms / 1000;
-    ts.tv_nsec = (ms % 1000) * 1000000L;
-    while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
-        /* 被信号打断就继续睡 */
+int create_memfd() {
+#ifdef SYS_memfd_create
+    return (int) syscall(SYS_memfd_create, "jit-cache", MFD_CLOEXEC);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+/*
+ * 把候选段搬进一个 memfd 并在原地址重映射。
+ * 返回成功换载的段数。
+ */
+int convert_once() {
+    Region regions[kMaxRegions];
+    int n = collect(regions, kMaxRegions);
+    if (n <= 0) {
+        return 0;
     }
+
+    size_t total = 0;
+    for (int i = 0; i < n; ++i) {
+        regions[i].size = (regions[i].size + kPage - 1) & ~(kPage - 1);
+        total += regions[i].size;
+    }
+
+    int fd = create_memfd();
+    if (fd < 0) {
+        logmsg("memfd_create failed: %d", errno);
+        return 0;
+    }
+    if (ftruncate(fd, (off_t) total) != 0) {
+        logmsg("ftruncate failed: %d", errno);
+        close(fd);
+        return 0;
+    }
+
+    /* 先把内容全部写进 memfd */
+    int mem = open("/proc/self/mem", O_RDONLY);
+    if (mem < 0) {
+        logmsg("open /proc/self/mem failed: %d", errno);
+        close(fd);
+        return 0;
+    }
+
+    char *buf = (char *) malloc(kMaxRegion);
+    if (buf == nullptr) {
+        close(mem);
+        close(fd);
+        return 0;
+    }
+
+    size_t off = 0;
+    int ready = 0;
+    for (int i = 0; i < n; ++i) {
+        size_t size = regions[i].size;
+        ssize_t got = pread(mem, buf, size, (off_t) regions[i].start);
+        if (got <= 0) {
+            logmsg("read %lx failed: %d", (unsigned long) regions[i].start, errno);
+            regions[i].size = 0;
+            continue;
+        }
+        if (pwrite(fd, buf, (size_t) got, (off_t) off) != got) {
+            logmsg("write memfd failed: %d", errno);
+            regions[i].size = 0;
+            continue;
+        }
+        regions[i].moff = (off_t) off;
+        off += size;
+        ++ready;
+    }
+    free(buf);
+    close(mem);
+
+    if (ready == 0) {
+        close(fd);
+        return 0;
+    }
+
+    /* 先试一次，确认本域允许对 memfd 做 PROT_EXEC */
+    void *probe = mmap(nullptr, kPage, PROT_READ | PROT_EXEC,
+                       MAP_SHARED, fd, 0);
+    if (probe == MAP_FAILED) {
+        logmsg("probe mmap(PROT_EXEC) denied: %d", errno);
+        close(fd);
+        return 0;
+    }
+    munmap(probe, kPage);
+    logmsg("probe exec memfd ok, regions=%d", ready);
+
+    int done = 0;
+    for (int i = 0; i < n; ++i) {
+        if (regions[i].size == 0) {
+            continue;
+        }
+        void *p = mmap((void *) regions[i].start, regions[i].size,
+                       PROT_READ | PROT_EXEC, MAP_SHARED | MAP_FIXED, fd,
+                       regions[i].moff);
+        if (p == MAP_FAILED) {
+            logmsg("MAP_FIXED %lx failed: %d", (unsigned long) regions[i].start, errno);
+            continue;
+        }
+        ++done;
+    }
+
+    close(fd);
+    logmsg("converted %d/%d", done, ready);
+    return done;
 }
 
-// 应用自己的 payload 通常在主线程启动后才映射，
-// 所以名字要在前 40 秒内分几次补齐，之后线程退出。
 void *worker(void *) {
-    static const long kScheduleMs[] = {
-            300, 700, 1200, 2000, 3500, 6000, 10000, 16000, 25000, 40000,
-    };
-
     sleep_ms(kFirstPassDelayMs);
 
-    char proc_name[128] = {0};
-    if (!read_process_name(proc_name, sizeof(proc_name))) {
+    char name[128] = {0};
+    if (!read_process_name(name, sizeof(name))) {
         return nullptr;
     }
-    if (is_special_process(proc_name)) {
-        return nullptr;                     /* usap / zygote 一律不碰 */
+    /* usap / zygote 不碰 */
+    if (strncmp(name, "usap", 4) == 0 || strstr(name, "zygote") != nullptr) {
+        return nullptr;
     }
 
+    static const long kScheduleMs[] = {
+            kFirstPassDelayMs, 1200, 3000, 8000, 20000, 40000,
+    };
     long elapsed = kFirstPassDelayMs;
+
     for (size_t i = 0; i < sizeof(kScheduleMs) / sizeof(kScheduleMs[0]); ++i) {
         long target = kScheduleMs[i];
         if (target > elapsed) {
             sleep_ms(target - elapsed);
             elapsed = target;
         }
-        if (switch_is_off()) {
-            return nullptr;                 /* 现场开关：随时能停 */
+        if (!convert_on()) {
+            continue;                    /* 只探测不换载时，仍然什么都不做 */
         }
-        rename_pass();
+        int done = convert_once();
+        if (done > 0) {
+            break;                       /* 换完就收工 */
+        }
     }
     return nullptr;
 }
@@ -262,12 +360,7 @@ public:
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         (void) args;
-
-        /*
-         * 这里只创建线程，绝不做任何同步工作。
-         * 该函数运行在 zygote specialization 窗口内，
-         * 窗口里任何额外耗时都会放大系统的 fork 竞态。
-         */
+        /* 这里只创建线程，不做任何同步工作 */
         pthread_t thread;
         if (pthread_create(&thread, nullptr, worker, nullptr) == 0) {
             pthread_detach(thread);

@@ -1,6 +1,6 @@
 id=hide_memory_traces
 name=Hide Memory Traces
-version=v1.1
-versionCode=2
+version=v2.0
+versionCode=3
 author=MashiroSann
-description=把进程内「匿名 + 可执行」的 VMA 改名为 ART 代码缓存名。只改名字，不改权限、不改内容、不改 VMA 数量。v1.1 起完全避开 zygote specialization 窗口。
+description=把进程里的「匿名 + 可执行」映射换成真正的 memfd 映射（内容逐字节不变）。不是改名，是真的换成 file-backed，因此 /proc/pid/map_files 有条目、可 fstat。默认只探测不换载。
