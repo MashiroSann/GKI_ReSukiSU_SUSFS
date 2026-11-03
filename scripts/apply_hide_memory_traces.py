@@ -45,6 +45,8 @@ MAPS_END = "/* --- hmt:maps:end --- */"
 # 放在 show_vma_header_prefix() 之前：它比 show_map_vma() 更早，
 # 而这段又不依赖 mem_size_stats。
 CORE = f"""{CORE_BEGIN}
+#include <linux/dcache.h>
+#include <linux/fs.h>
 #include <linux/kdev_t.h>
 #include <linux/mount.h>
 
@@ -93,21 +95,62 @@ static bool hmt_fake_memfd(const struct vm_area_struct *vma)
 }}
 
 /*
- * 伪 inode：全局常量。
+ * 伪 inode。
  *
- * 之前按 vm_start 算，一个进程里就冒出 8 个不同的 jit-cache inode，
- * Duck 直接报 "8 distinct inodes, unusual for a single app process"。
- * 固定成一个值之后，进程里只剩「真实 jit-cache inode + 这一个」，
- * 语义上也自洽：就像同一份被继承下来的 memfd 有多段窗口。
+ * 目标：让进程里「jit-cache」的 inode 集合和原生设备完全一致。
+ *
+ * 原生 Android 13 的 ART 有两个：
+ *   /memfd:jit-zygote-cache   (zygote 传下来的)
+ *   /memfd:jit-cache          (本进程的)
+ *
+ * 所以我们不去编一个新 inode，而是**直接复用本进程真实 jit-cache 的 inode**：
+ * 这样那些匿名段在观测面上就是「同一个 jit-cache 文件的另一段窗口」，
+ * inode 集合仍然是 {{zygote-cache, jit-cache}} 两个，任何「distinct inode」
+ * 计数都不会异常。
+ *
+ * 只在找不到真实 jit-cache 时（例如 zygote 自己）才退回常量。
  */
 #define HMT_FAKE_INO   0x40000UL
 /* ART 的 jit-cache 可执行窗口 pgoff 固定是 32 MB，这里对齐它 */
 #define HMT_EXEC_PGOFF 0x2000000ULL
 
+static bool hmt_is_jitcache_file(const struct file *file)
+{{
+	const struct dentry *dentry = file->f_path.dentry;
+	unsigned int len = dentry->d_name.len;
+
+	/* "memfd:jit-cache" 正好 15 字节 */
+	if (len != 15)
+		return false;
+	return !memcmp(dentry->d_name.name, "memfd:jit-cache", 15);
+}}
+
+/*
+ * 在 mm 的 vma 链表里找真实 jit-cache 的 inode。
+ * 调用点都在 procfs 读路径上，mmap_read_lock 已经持有，链表是稳定的。
+ */
+static unsigned long hmt_real_jit_ino(const struct vm_area_struct *vma)
+{{
+	const struct vm_area_struct *v;
+
+	if (!vma->vm_mm)
+		return 0;
+
+	for (v = vma->vm_mm->mmap; v; v = v->vm_next) {{
+		if (!v->vm_file)
+			continue;
+		if (!hmt_is_jitcache_file(v->vm_file))
+			continue;
+		return file_inode(v->vm_file)->i_ino;
+	}}
+	return 0;
+}}
+
 static unsigned long hmt_fake_ino(const struct vm_area_struct *vma)
 {{
-	(void) vma;
-	return HMT_FAKE_INO;
+	unsigned long ino = hmt_real_jit_ino(vma);
+
+	return ino ? ino : HMT_FAKE_INO;
 }}
 
 /* pagemap：宣告为文件页；比对型检测器依据该位整页跳过 */
