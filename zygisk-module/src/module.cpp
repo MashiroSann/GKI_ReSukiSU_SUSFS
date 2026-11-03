@@ -348,7 +348,7 @@ void probe_once() {
     for (int i = 0; i < n; ++i) {
         total += regions[i].size;
     }
-    logmsg("candidates=%d total=%zu", n, total);
+    logmsg("candidates=%d total=%lu", n, (unsigned long) total);
 }
 
 void *worker(void *) {
