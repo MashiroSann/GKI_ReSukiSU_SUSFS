@@ -961,6 +961,49 @@ jobs:
             echo "已为 fs/susfs.o 关闭 -Wunused-function（上游回归临时规避）"
           fi
 
+      # ==================== 修复 selinux_hide 失效 ====================
+      # BakaSU 的 kernel/tools/susfs_compat.mk 会在 security/selinux/hooks.c
+      # 出现 ksu_selinux_hide_running 时定义
+      #   -DKSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
+      # 而 SUSFS 的 patch 确实往 hooks.c 插入了该符号，所以这个宏必然被定义。
+      #
+      # 该宏会让 selinux_hide.c 里所有 #ifndef 块整段失效，包括：
+      #   - write_op[SEL_CONTEXT] / write_op[SEL_ACCESS] 的 ksu_patch_text 安装
+      #   - selinux_setprocattr 的 lsm hook 注册
+      # 结果 ksu_selinux_hide_enable() 提前返回成功但不安装任何 hook，
+      # ksu_selinux_hide_running 保持 false。
+      #
+      # 而 SUSFS 的 security/selinux/selinuxfs.c 里靠这个变量分流：
+      #   if (current_uid().val >= 10000 && ksu_selinux_hide_running)
+      #           return susfs_sel_write_access(...);  // 过滤
+      #   return sel_write_access(...);                // 原生
+      # running 恒为 false => 永远走原生 => app 能拿到真实 AV 判定 =>
+      # Duck 报 "Dirty SELinux policy exposes LSPosed rule"。
+      #
+      # 修复：把这个宏的注入注释掉，让 BakaSU 原有的 hook 安装代码参与编译，
+      # 从而 ksu_selinux_hide_running 能在 enable 成功后被置 true。
+      - name: 修复 selinux_hide 未生效（移除 SUSFS compat 宏）
+        if: ${{ inputs.clean_build != true && inputs.enable_susfs && inputs.kernel_version == '5.10' }}
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          set -euo pipefail
+          COMPAT_MK="KernelSU/kernel/tools/susfs_compat.mk"
+          if [ ! -f "$COMPAT_MK" ]; then
+            echo "::warning::未找到 $COMPAT_MK，跳过 selinux_hide 修复"
+            exit 0
+          fi
+
+          if grep -q '^[[:space:]]*ccflags-y += -DKSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE' "$COMPAT_MK"; then
+            sed -i 's|^\([[:space:]]*\)ccflags-y += -DKSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE|\1# [hmt-fix] disabled: \&|' "$COMPAT_MK"
+            echo "已注释 KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE，恢复 write_op / lsm hook"
+          else
+            echo "宏未以预期形式出现，当前内容："
+            grep -n 'SELINUX_HIDE' "$COMPAT_MK" || true
+          fi
+
+          echo "--- 修改后的 susfs_compat.mk ---"
+          grep -n 'SELINUX_HIDE' "$COMPAT_MK" || echo "(no SELINUX_HIDE lines)"
+
       - name: 集成 NoMount 挂载元模块
         if: ${{ inputs.clean_build != true && inputs.use_nomount }}
         working-directory: ${{ env.KERNEL_ROOT }}/common
