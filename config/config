@@ -31,7 +31,7 @@ custom=true
 #   784ac9e6 新增的 sus_path_uid_filter / priority_uid_filter 对本场景无用，
 #   且这两个能力已被模块 fgetpriority / cq_uid_seccomp 覆盖。
 #   等上游把 AV 拦截能力做回来再跟。
-gki-android12-5.10=784ac9e6fd49bb02499b5b60c57ccc9d0c680204
+gki-android12-5.10=8930474a
 gki-android13-5.15=
 gki-android14-6.1=
 gki-android15-6.6=
