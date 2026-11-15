@@ -17,13 +17,27 @@ custom=true
 
 # ==================== SUSFS 各分支的 commit hash ====================
 # 仅当 custom=true 时生效；留空表示跟随该分支最新提交
-# 8930474a: 2026-10-29 22:53，2026-10-30 成功构建所用提交
-# 之后的上游改动引入了 priority_uid_filter 编译失败与 selinux_hide 规则外泄，暂不跟进
-gki-android12-5.10=8930474a
+# 784ac9e: 2026-11-15，跟到最新（sus_path_uid_filter + 正确 header gate）
+# 说明：此前 8930474a 之所以被锁，是因为 aa61fe0 的 priority_uid_filter 缺少
+#       Kconfig 定义导致编译失败、以及 selinux_hide 规则外泄；这两点现已在
+#      上游修复（Kconfig 已有 default y，selinux_hide 已回退到 hash 机制）。
+gki-android12-5.10=784ac9e6fd49bb02499b5b60c57ccc9d0c680204
 gki-android13-5.15=
 gki-android14-6.1=
 gki-android15-6.6=
 gki-android16-6.12=
+
+# ==================== NoMount 的 commit hash ====================
+# 仅当 custom=true 且 use_nomount=true 时生效；留空表示跟随 dev 分支最新提交
+# 611f242: 2026-11-15，dev 分支最新（v2.3.0 之后的 nm 直调改造）
+# 注意：NoMount 的内核驱动与 metamodule 必须版本匹配，
+#       模块侧的 NoMount 版本需同步更新到 v2.3.0 或更新。
+nomount=611f2420abfd49c716e7e1ca685a7b6143eb2cae
+
+# ==================== BakaSU 的 commit hash ====================
+# 仅当 custom=true 时生效；留空表示跟随 main 分支最新提交
+# 548d1dd: 2026-11-09，main 最新（manager UI 修复与翻译，内核侧无改动）
+bakasu=548d1dda060ca198823d8808804d01f5209ef4a9
 
 # ==================== SukiSU 的 commit hash ====================
 # 仅当 custom=true 且使用 SukiSU 变体时生效
