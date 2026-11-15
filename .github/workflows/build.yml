@@ -597,8 +597,18 @@ jobs:
             BRANCH="$branch_input"
             echo "使用自定义分支/提交: $branch_input"
           else
-            # BakaSU 默认使用 main 分支
+            # 其次读 config/config 的 bakasu= （留空则跟随 main 最新）
             BRANCH="main"
+            CONFIG_FILE="$GITHUB_WORKSPACE/config/config"
+            if [ -f "$CONFIG_FILE" ] && grep -q '^custom=true' "$CONFIG_FILE"; then
+              CUSTOM_BAKASU=$(grep '^bakasu=' "$CONFIG_FILE" | cut -d'=' -f2 | tr -d '[:space:]')
+              if [ -n "${CUSTOM_BAKASU:-}" ]; then
+                BRANCH="$CUSTOM_BAKASU"
+                echo "BakaSU 使用锁定提交: $BRANCH"
+              else
+                echo "BakaSU 未锁定，跟随 main 分支最新提交"
+              fi
+            fi
           fi
 
           echo "BRANCH=$BRANCH" >> $GITHUB_ENV
@@ -956,14 +966,35 @@ jobs:
         working-directory: ${{ env.KERNEL_ROOT }}/common
         run: |
           set -euo pipefail
+
+          # 允许用 config/config 里的 nomount= 锁定提交，避免每次构建
+          # 都跟随 dev 分支漂移（同一份补丁可能编出不同内核）。
+          NOMOUNT_REF="dev"
+          CONFIG_FILE="$GITHUB_WORKSPACE/config/config"
+          if [ -f "$CONFIG_FILE" ] && grep -q '^custom=true' "$CONFIG_FILE"; then
+            CUSTOM_NOMOUNT=$(grep '^nomount=' "$CONFIG_FILE" | cut -d'=' -f2 | tr -d '[:space:]')
+            if [ -n "${CUSTOM_NOMOUNT:-}" ]; then
+              NOMOUNT_REF="$CUSTOM_NOMOUNT"
+              echo "NoMount 使用锁定提交: $NOMOUNT_REF"
+            else
+              echo "NoMount 未锁定，跟随 dev 分支最新提交"
+            fi
+          fi
+
           curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
-            https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s dev
+            https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s "$NOMOUNT_REF"
 
           if [ ! -L "fs/nomount" ]; then
             echo "::error::NoMount 集成失败：fs/nomount 软链接缺失"
             exit 1
           fi
-          echo "NoMount 集成完成，commit: $(git -C NoMount rev-parse HEAD)"
+
+          NOMOUNT_ACTUAL=$(git -C NoMount rev-parse HEAD)
+          if [[ "$NOMOUNT_REF" =~ ^[a-fA-F0-9]{40}$ ]] && [[ "${NOMOUNT_ACTUAL,,}" != "${NOMOUNT_REF,,}" ]]; then
+            echo "::error::NoMount 实际提交 $NOMOUNT_ACTUAL 与指定提交 $NOMOUNT_REF 不一致"
+            exit 1
+          fi
+          echo "NoMount 集成完成，commit: $NOMOUNT_ACTUAL"
 
           if ! grep -q '^CONFIG_NOMOUNT=y' "$DEFCONFIG"; then
             echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG"
