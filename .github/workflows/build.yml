@@ -982,28 +982,6 @@ jobs:
       #
       # 修复：把这个宏的注入注释掉，让 BakaSU 原有的 hook 安装代码参与编译，
       # 从而 ksu_selinux_hide_running 能在 enable 成功后被置 true。
-      - name: 修复 selinux_hide 未生效（移除 SUSFS compat 宏）
-        if: ${{ inputs.clean_build != true && inputs.enable_susfs && inputs.kernel_version == '5.10' }}
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: |
-          set -euo pipefail
-          COMPAT_MK="KernelSU/kernel/tools/susfs_compat.mk"
-          if [ ! -f "$COMPAT_MK" ]; then
-            echo "::warning::未找到 $COMPAT_MK，跳过 selinux_hide 修复"
-            exit 0
-          fi
-
-          if grep -q '^[[:space:]]*ccflags-y += -DKSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE' "$COMPAT_MK"; then
-            sed -i 's|^\([[:space:]]*\)ccflags-y += -DKSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE|\1# [hmt-fix] disabled: \&|' "$COMPAT_MK"
-            echo "已注释 KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE，恢复 write_op / lsm hook"
-          else
-            echo "宏未以预期形式出现，当前内容："
-            grep -n 'SELINUX_HIDE' "$COMPAT_MK" || true
-          fi
-
-          echo "--- 修改后的 susfs_compat.mk ---"
-          grep -n 'SELINUX_HIDE' "$COMPAT_MK" || echo "(no SELINUX_HIDE lines)"
-
       - name: 集成 NoMount 挂载元模块
         if: ${{ inputs.clean_build != true && inputs.use_nomount }}
         working-directory: ${{ env.KERNEL_ROOT }}/common
