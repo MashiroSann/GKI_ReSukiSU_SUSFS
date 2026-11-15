@@ -17,10 +17,20 @@ custom=true
 
 # ==================== SUSFS 各分支的 commit hash ====================
 # 仅当 custom=true 时生效；留空表示跟随该分支最新提交
-# 784ac9e: 2026-11-15，跟到最新（sus_path_uid_filter + 正确 header gate）
-# 说明：此前 8930474a 之所以被锁，是因为 aa61fe0 的 priority_uid_filter 缺少
-#       Kconfig 定义导致编译失败、以及 selinux_hide 规则外泄；这两点现已在
-#      上游修复（Kconfig 已有 default y，selinux_hide 已回退到 hash 机制）。
+# 8930474a: 2026-10-29，已验证可过 Duck 全绿的那个提交。
+#
+# 为什么从 784ac9e6 回退：
+#   784ac9e6 的 selinux_hide 被上游重写，删掉了对 SELinux AV 判定的拦截。
+#   旧版用 ksu_patch_text 替换 write_op[SEL_CONTEXT] / write_op[SEL_ACCESS]
+#   的函数指针，并 hook selinux_setprocattr；新版只伪造 /sys/fs/selinux/status
+#   并维护策略快照。结果是 Duck 能写 /sys/fs/selinux/access 拿到真实判定，报
+#   "Dirty SELinux policy exposes LSPosed rule"：
+#     untrusted_app  -> lsposed_file:file read          Allowed
+#     untrusted_app  -> ksu_file:file read              Allowed
+#     system_server  -> system_server:process execmem   Allowed
+#   784ac9e6 新增的 sus_path_uid_filter / priority_uid_filter 对本场景无用，
+#   且这两个能力已被模块 fgetpriority / cq_uid_seccomp 覆盖。
+#   等上游把 AV 拦截能力做回来再跟。
 gki-android12-5.10=784ac9e6fd49bb02499b5b60c57ccc9d0c680204
 gki-android13-5.15=
 gki-android14-6.1=
