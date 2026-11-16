@@ -53,7 +53,7 @@ nomount=611f2420abfd49c716e7e1ca685a7b6143eb2cae
 # ==================== BakaSU 的 commit hash ====================
 # 仅当 custom=true 时生效；留空表示跟随 main 分支最新提交
 #
-# 252b152: BakaSU PR #662「sync with upstream」分支 sync-up 的 head（2026-11-14）。
+# a671d80: BakaSU PR #662「sync with upstream」分支 sync-up 的 head（2026-11-16，含 susfs build 修复）。
 #   选它的原因：自带新版 SUSFS 需要的 KernelSU 侧集成 ——
 #     kernel/selinux/sepolicy.c:   susfs_add_sus_type() / susfs_add_sus_avd_allowed_by_type()
 #     kernel/Kconfig:              config KSU_SUSFS_PRIORITY_UID_FILTER
@@ -64,7 +64,7 @@ nomount=611f2420abfd49c716e7e1ca685a7b6143eb2cae
 #   配合 SUSFS manual hook 会链接失败（undefined symbol: selinux_hide_init_setxattr）。
 #   构建时由 scripts/apply_syncup_setxattr_guard.py 补上这层 guard。
 #   等 PR 合并 / 上游修复后，可移除该脚本并改回 main 的提交。
-bakasu=252b15203940c00570c65c0d33db12d9e76c4dff
+bakasu=a671d80097e887526115400402d87cac568daa91
 
 # ==================== SukiSU 的 commit hash ====================
 # 仅当 custom=true 且使用 SukiSU 变体时生效
