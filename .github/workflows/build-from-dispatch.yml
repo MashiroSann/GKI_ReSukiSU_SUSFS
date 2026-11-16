@@ -1,0 +1,62 @@
+name: Build Custom From Dispatch
+
+# 本工作流用于在无法使用 workflow_dispatch 的仓库上，通过 repository_dispatch
+# 事件触发一次固定参数的定制内核构建（参数与 kernel-custom.yml 保持一致）。
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  repository_dispatch:
+    types: [build-custom-kernel]
+
+jobs:
+  validate-custom-kmi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 验证 Android 与内核版本配对
+        env:
+          ANDROID_VERSION: ${{ github.event.client_payload.android_version }}
+          KERNEL_VERSION: ${{ github.event.client_payload.kernel_version }}
+        run: |
+          case "$ANDROID_VERSION-$KERNEL_VERSION" in
+            android12-5.10|android13-5.10|android13-5.15|android14-5.15|android14-6.1|android15-6.6|android16-6.12|android17-6.18)
+              ;;
+            *)
+              echo "::error::不支持的 Android/KMI 组合: $ANDROID_VERSION / $KERNEL_VERSION"
+              exit 1
+              ;;
+          esac
+
+  build-custom-kernel:
+    name: "${{ github.event.client_payload.kernel_version }}.${{ github.event.client_payload.sub_level }}-${{ github.event.client_payload.android_version }}-${{ github.event.client_payload.os_patch_level }}"
+    needs: validate-custom-kmi
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      clean_build: false
+      disable_bakasu: false
+      android_version: ${{ github.event.client_payload.android_version }}
+      kernel_version: ${{ github.event.client_payload.kernel_version }}
+      sub_level: ${{ github.event.client_payload.sub_level }}
+      os_patch_level: ${{ github.event.client_payload.os_patch_level }}
+      revision: ${{ github.event.client_payload.revision }}
+      ksu_variant: BakaSU
+      ksu_branch: ''
+      version: ${{ github.event.client_payload.version }}
+      build_time: ${{ github.event.client_payload.build_time }}
+      use_zram: true
+      use_bbg: true
+      use_rekernel: false
+      cve_2026_43499_patch: true
+      supp_op: false
+      enable_susfs: true
+      droidspaces: 'off'
+      droidspaces_ntsync: false
+      use_nomount: true
+      hide_memory_traces: true
+      build_bypass: false
