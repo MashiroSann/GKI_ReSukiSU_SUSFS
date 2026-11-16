@@ -17,21 +17,27 @@ custom=true
 
 # ==================== SUSFS 各分支的 commit hash ====================
 # 仅当 custom=true 时生效；留空表示跟随该分支最新提交
-# 8930474a: 2026-10-29，已验证可过 Duck 全绿的那个提交。
 #
-# 为什么从 784ac9e6 回退：
-#   784ac9e6 的 selinux_hide 被上游重写，删掉了对 SELinux AV 判定的拦截。
-#   旧版用 ksu_patch_text 替换 write_op[SEL_CONTEXT] / write_op[SEL_ACCESS]
-#   的函数指针，并 hook selinux_setprocattr；新版只伪造 /sys/fs/selinux/status
-#   并维护策略快照。结果是 Duck 能写 /sys/fs/selinux/access 拿到真实判定，报
-#   "Dirty SELinux policy exposes LSPosed rule"：
-#     untrusted_app  -> lsposed_file:file read          Allowed
-#     untrusted_app  -> ksu_file:file read              Allowed
-#     system_server  -> system_server:process execmem   Allowed
-#   784ac9e6 新增的 sus_path_uid_filter / priority_uid_filter 对本场景无用，
-#   且这两个能力已被模块 fgetpriority / cq_uid_seccomp 覆盖。
-#   等上游把 AV 拦截能力做回来再跟。
-gki-android12-5.10=8930474a
+# 784ac9e6: 2026-11-15，gki-android12-5.10 分支 tip，selinux_hide 重写版。
+#   新版不再由 KernelSU 侧维护 backup policy，而是在内核侧
+#   security/selinux/{selinuxfs,hooks,ss/services}.c 编译期接管
+#   /sys/fs/selinux/{access,context,status} 与 setprocattr，并依赖两张
+#   "sus 注册表" 决定哪些 type / 规则属于 KSU 注入、需要对普通 app 隐藏。
+#
+#   11-15 那次构建失败的原因已定位：注册表是空的。
+#   官方 KernelSU 由 kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+#   在 add_type()/add_rule_raw() 里打点；但 BakaSU 变体在构建流程里走
+#   "使用内置 SUSFS 支持"分支，不会应用该补丁，于是注册表永远为空，
+#   ksu_selinux_hide_running=1 也什么都藏不住（Duck 报 context oracle 11、
+#   DirtySepolicy 边全部 Allowed）。现由 scripts/apply_susfs_sus_registry.py
+#   在构建时补打这两个点。
+#
+#   另外 scripts/apply_selinux_timing_alignment.py 会把
+#   susfs_selinux_setprocattr() 的前导换行剥掉，让 Duck 1110 新增的
+#   app_zygote attr/current A/B 时序判据失去稳定的正时序差。
+#
+# 8930474a: 2026-10-29，旧版全量伪造 selinux_hide，作为回滚点保留备注。
+gki-android12-5.10=784ac9e6fd49bb02499b5b60c57ccc9d0c680204
 gki-android13-5.15=
 gki-android14-6.1=
 gki-android15-6.6=
