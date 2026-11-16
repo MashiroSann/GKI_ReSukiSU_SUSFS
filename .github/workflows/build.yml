@@ -1046,18 +1046,29 @@ jobs:
           echo "SELinux setprocattr 时序对齐已应用："
           grep -n 'hmt-timing-align' security/selinux/hooks.c | head -5
 
-      # ==================== SELinux status 页同步 ====================
-      # 伪造的 /sys/fs/selinux/status 页是启动早期快照；策略被重载后
-      # sequence/policyload 会过期，Duck 的 DirtySepolicy 2.2 一致性检查
-      # 会把它和 /access 返回的 avd.seqno 判为矛盾（DirtySepolicy WARNING）。
-      # 这里在返回伪造页前用真实 status 页刷新计数，仅强制 enforcing=1。
-      - name: 同步 SELinux status 页计数
+      # ==================== avd.seqno 初始代次 ====================
+      # sync-up 内核启动期间策略重载多次，live policy 的 latest_granting=6，
+      # Duck 的 DirtySepolicy 2.2 一致性检查把 avdSeqNo!=1 判为 WARNING。
+      # 这里让 app 侧 /access 查询返回 stock 初始代次 1。
+      - name: 固定 SELinux avd.seqno 为初始值
         if: ${{ inputs.clean_build != true && inputs.disable_bakasu != true && inputs.enable_susfs && inputs.kernel_version == '5.10' }}
         working-directory: ${{ env.KERNEL_ROOT }}/common
         run: |
           set -euo pipefail
-          python3 "$GITHUB_WORKSPACE/scripts/apply_fake_status_counters.py" .
-          grep -q 'hmt-fake-status-sync' security/selinux/selinuxfs.c
+          python3 "$GITHUB_WORKSPACE/scripts/apply_avd_seqno_initial.py" .
+          grep -q 'hmt-avd-seqno-initial' security/selinux/ss/services.c
+
+      # ==================== sync-up 运行时开关修复 ====================
+      # sync-up 的 ksu_selinux_hide_enable() 要求 backup_sepolicy 存在，
+      # 但 boot-completed 会释放它；于是「关一次再开」后隐藏全部失效。
+      # manual hook 模式下隐藏由内核侧实现，把该检查编译掉即可反复开关。
+      - name: 修复 selinux_hide 运行时开关
+        if: ${{ inputs.clean_build != true && inputs.disable_bakasu != true && inputs.ksu_variant == 'BakaSU' }}
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/apply_syncup_reenable_fix.py" \
+            "$KERNEL_ROOT/KernelSU/kernel/feature/selinux_hide.c"
+
       # ==================== BakaSU sync-up guard ====================
       # sync-up(252b1520) 的 ksu_selinux_hide_enable() 里对
       # selinux_hide_init_setxattr() 的调用漏了 #ifndef 保护；SUSFS manual hook
