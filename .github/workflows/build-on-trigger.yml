@@ -1,0 +1,55 @@
+name: Build On Trigger
+
+# 仓库的 workflow_dispatch / repository_dispatch 事件被 GitHub 拒绝
+# （"Actions has been disabled for this repository"），但 push 事件仍可触发运行。
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'trigger/**'
+
+jobs:
+  validate-custom-kmi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 打印参数
+        run: |
+          echo "trigger file:"
+          echo "android12 / 5.10 / 233 / 2025-02 / r6"
+
+  build-custom-kernel:
+    name: "5.10.233-android12-2025-02"
+    needs: validate-custom-kmi
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      clean_build: false
+      disable_bakasu: false
+      android_version: android12
+      kernel_version: "5.10"
+      sub_level: "233"
+      os_patch_level: "2025-02"
+      revision: r6
+      ksu_variant: BakaSU
+      ksu_branch: ''
+      version: 5.10.233-Noir
+      build_time: "Sun Jun. 01 08:10:00 UTC 2024"
+      use_zram: true
+      use_bbg: true
+      use_rekernel: false
+      cve_2026_43499_patch: true
+      supp_op: false
+      enable_susfs: true
+      droidspaces: 'off'
+      droidspaces_ntsync: false
+      use_nomount: true
+      hide_memory_traces: true
+      build_bypass: false
