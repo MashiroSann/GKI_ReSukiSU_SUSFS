@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
-"""给 BakaSU sync-up(PR #662) 的 selinux_hide.c 补一层 #ifndef 保护。
+"""BakaSU sync-up：让 setxattr 初始化只在「无 SUSFS manual hook」时参与编译。
 
 背景
 ----
-BakaSU sync-up 分支的 head 提交 `252b1520`
-（"kernel: Add LSM hook for inode_setxattr", KernelSU PR #3996）在
-`kernel/feature/selinux_hide.c` 的 `ksu_selinux_hide_enable()` 里新增了：
-
-    ret = selinux_hide_init_setxattr();
-    if (ret) {
-        pr_err("selinux_hide: init: setxattr helpers err: %d\\n", ret);
-        return ret;
-    }
-
-但同一个提交把 `selinux_hide_init_setxattr()` 的**定义**放进了
-`#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE` 块内。
-
-只要 SUSFS 提供 manual hook（即 `security/selinux/hooks.c` 里出现
-`ksu_selinux_hide_running`，BakaSU 的 `susfs_compat.mk` 就会定义
-`KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE`），定义就被预处理器裁掉、
-调用却还在 → 链接报：
-
+BakaSU PR #662（sync-up）引入 `inode_setxattr` LSM hook 时，`selinux_hide_init_setxattr()`
+原本被 `#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE ... #endif` 包住，
+但 `ku_selinux_hide_enable()` 里的调用没包 → 接 SUSFS 的内核链接失败：
     ld.lld: error: undefined symbol: selinux_hide_init_setxattr
 
-新版 SUSFS 的 setxattr 隐藏由内核侧 `handle_selinux_inode_setxattr` 接管，
-BakaSU 侧这个 helper 在 manual hook 模式下本来就不需要调用，因此这里直接把
-调用包进同样的 `#ifndef`。属于上游漏保护，等 BakaSU 修复后本脚本可移除。
+后来上游 commit a671d800（"fix2"）把**函数定义**挪出了 `#ifndef` 块（调用仍在外），
+链接错误消失；但函数体引用了 `inode_doinit_with_dentry_fn`，而该变量只在
+`#ifndef` 块内声明 → 接 SUSFS 时变成编译错误：
+    error: use of undeclared identifier 'inode_doinit_with_dentry_fn'
+
+本脚本做自适应修补（两种布局都能处理）：
+- 旧布局（如 252b1520）：定义已在 #ifndef 内，只需给「调用」加同样保护；
+- 新布局（a671d800+）：定义被挪到 #ifndef 外 → 给「定义」和「调用」都加保护。
+
+`selinux_hide_init_setxattr()` 只服务于旧的 manual hook 实现；新 SUSFS 的隐藏由
+内核侧 security/selinux/* 完成，接 SUSFS 时这两块本来就不该参与编译。
 
 用法
 ----
@@ -33,35 +26,61 @@ BakaSU 侧这个 helper 在 manual hook 模式下本来就不需要调用，因�
 
 退出码
 ------
-    0  已注入 / 已存在（幂等）；或该文件不含这段代码（非 sync-up，无需处理）
-    2  锚点不匹配（需要人工适配）
+    0  已注入 / 已存在
+    2  锚点不匹配
 """
 
 import os
+import re
 import sys
 
 MARK = "hmt-syncup-setxattr-guard"
+MACRO = "KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE"
 
-CALL_BLOCK = """    ret = selinux_hide_init_setxattr();
-    if (ret) {
-        pr_err("selinux_hide: init: setxattr helpers err: %d\\n", ret);
-        return ret;
-    }"""
-
-GUARDED_BLOCK = """#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
-    /* hmt-syncup-setxattr-guard: sync-up(252b1520) 漏了这层 guard，
-     * 该函数定义只在宏未定义时编译；manual hook 模式下由内核侧接管。 */
-    ret = selinux_hide_init_setxattr();
-    if (ret) {
-        pr_err("selinux_hide: init: setxattr helpers err: %d\\n", ret);
-        return ret;
-    }
-#endif // #ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE"""
+DEF_RE = re.compile(r"^\s*(?:static|__maybe_static)\s+int\s+selinux_hide_init_setxattr\s*\(\s*\)\s*$")
+CALL_RE = re.compile(r"^\s*ret\s*=\s*selinux_hide_init_setxattr\(\);\s*$")
 
 
 def fail(msg):
     sys.stderr.write("error: %s\n" % msg)
     sys.exit(2)
+
+
+def find_block_end(lines, start):
+    """从 start 行开始找花括号配对的结束行索引（0-based）。"""
+    depth = 0
+    seen = False
+    for i in range(start, len(lines)):
+        for ch in lines[i]:
+            if ch == "{":
+                depth += 1
+                seen = True
+            elif ch == "}":
+                depth -= 1
+                if seen and depth == 0:
+                    return i
+    return None
+
+
+def guarded_before(lines, idx):
+    """判断 idx 之前是否存在未闭合的 #ifndef <MACRO> 区块。"""
+    start = None
+    for i in range(idx - 1, -1, -1):
+        if re.match(r"^\s*#ifndef\s+" + MACRO + r"\b", lines[i]):
+            start = i
+            break
+    if start is None:
+        return False
+    depth = 0
+    for i in range(start + 1, idx):
+        line = lines[i].strip()
+        if re.match(r"^#if(n?def)?\b", line) or line.startswith("#if "):
+            depth += 1
+        elif line.startswith("#endif"):
+            depth -= 1
+            if depth < 0:
+                return False
+    return True
 
 
 def main():
@@ -74,37 +93,70 @@ def main():
         fail("找不到 %s" % path)
 
     with open(path, "r", encoding="utf-8") as f:
-        src = f.read()
+        lines = f.read().split("\n")
 
-    if MARK in src:
-        print("[syncup-guard] 已注入，跳过：%s" % path)
+    if any(MARK in l for l in lines):
+        print("[setxattr-guard] 已注入，跳过：%s" % path)
         return
 
-    if "selinux_hide_init_setxattr" not in src:
-        # main / 其他分支没有这段代码，无需处理
-        print("[syncup-guard] 该文件不含 selinux_hide_init_setxattr，跳过：%s" % path)
-        return
+    def_idx = next((i for i, l in enumerate(lines) if DEF_RE.match(l)), None)
+    call_idx = next((i for i, l in enumerate(lines) if CALL_RE.match(l)), None)
+    if def_idx is None or call_idx is None:
+        fail("%s: 找不到 selinux_hide_init_setxattr 的定义或调用" % path)
 
-    if src.count(CALL_BLOCK) != 1:
-        fail(
-            "%s: 调用锚点匹配 %d 次（期望 1 次），sync-up 结构可能已变，需人工适配"
-            % (path, src.count(CALL_BLOCK))
-        )
+    # 每一项：(行号, 要插入到该行之前的文本)
+    ins = []
+    added = 0
 
-    patched = src.replace(CALL_BLOCK, GUARDED_BLOCK, 1)
+    # 1) 新布局：定义在 #ifndef 外 → 给定义加保护
+    if not guarded_before(lines, def_idx):
+        def_end = find_block_end(lines, def_idx)
+        if def_end is None:
+            fail("无法定位 selinux_hide_init_setxattr 定义结束行")
+        ins.append((def_idx, "#ifndef " + MACRO + " // " + MARK + "\n"))
+        ins.append((def_end + 1, "#endif // #ifndef " + MACRO + "\n"))
+        added += 1
 
-    # 自检：注入后花括号/预处理配平粗检
-    if patched.count("#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE") != \
-            src.count("#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE") + 2:
-        fail("注入后预处理指令数量异常")
-    if patched.count("#endif") != src.count("#endif") + 1:
+    # 2) 调用加保护
+    if not guarded_before(lines, call_idx):
+        if call_idx + 1 >= len(lines) or not re.match(r"^\s*if\s*\(ret\)\s*\{\s*$", lines[call_idx + 1]):
+            fail("selinux_hide_init_setxattr() 调用后找不到 if (ret) { ... }")
+        if_end = find_block_end(lines, call_idx + 1)
+        if if_end is None:
+            fail("无法定位 if (ret) { ... } 结束行")
+        ins.append((call_idx, "#ifndef " + MACRO + " // " + MARK + "\n"))
+        ins.append((if_end + 1, "#endif // #ifndef " + MACRO + "\n"))
+        added += 1
+
+    if not ins:
+        fail("没有需要注入的位置（文件结构与预期不符）")
+
+    base_mark = "\n".join(lines).count(MARK)
+    base_endif = "\n".join(lines).count("#endif // #ifndef " + MACRO)
+
+    for idx, text in sorted(ins, key=lambda x: -x[0]):
+        lines.insert(idx, text)
+
+    patched = "\n".join(lines)
+    if patched.count(MARK) - base_mark != added:
+        fail("注入后 #ifndef 数量异常（%d != %d）" % (patched.count(MARK) - base_mark, added))
+    if patched.count("#endif // #ifndef " + MACRO) - base_endif != added:
         fail("注入后 #endif 数量异常")
+
+    # 自检：修补后定义行/调用行都应处于 #ifndef 保护内（后插的 #endif 不影响后续判断）
+    new_lines = patched.split("\n")
+    new_def = next(i for i, l in enumerate(new_lines) if DEF_RE.match(l))
+    new_call = next(i for i, l in enumerate(new_lines) if CALL_RE.match(l))
+    if not guarded_before(new_lines, new_def):
+        fail("自检失败：定义未处于 #ifndef 保护内")
+    if not guarded_before(new_lines, new_call):
+        fail("自检失败：调用未处于 #ifndef 保护内")
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(patched)
 
-    print("[syncup-guard] 注入完成：%s" % path)
-    print("[syncup-guard]   ksu_selinux_hide_enable(): selinux_hide_init_setxattr() 调用已加 #ifndef 保护")
+    print("[setxattr-guard] 注入完成：%s" % path)
+    print("[setxattr-guard]   定义加保护=%s，调用加保护=yes" % (added == 2))
 
 
 if __name__ == "__main__":
