@@ -1058,6 +1058,17 @@ jobs:
           python3 "$GITHUB_WORKSPACE/scripts/apply_avd_seqno_initial.py" .
           grep -q 'hmt-avd-seqno-initial' security/selinux/ss/services.c
 
+      # ==================== BakaSU sync-up setxattr guard ====================
+      # 上游 PR #662 在 manual hook 模式下把 selinux_hide_init_setxattr() 的定义
+      # 编掉但调用没编掉（链接错误）；fix2 又把定义挪出 #ifndef（编译错误）。
+      # 自适应脚本会把定义/调用都包进同一个 #ifndef 保护。
+      - name: 修补 BakaSU sync-up 的 setxattr guard
+        if: ${{ inputs.clean_build != true && inputs.disable_bakasu != true && inputs.ksu_variant == 'BakaSU' }}
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/apply_syncup_setxattr_guard.py" \
+            "$KERNEL_ROOT/KernelSU/kernel/feature/selinux_hide.c"
+
       # ==================== sync-up 运行时开关修复 ====================
       # sync-up 的 ksu_selinux_hide_enable() 要求 backup_sepolicy 存在，
       # 但 boot-completed 会释放它；于是「关一次再开」后隐藏全部失效。
