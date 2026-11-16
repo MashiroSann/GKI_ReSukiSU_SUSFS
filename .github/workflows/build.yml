@@ -1046,6 +1046,16 @@ jobs:
           echo "SELinux setprocattr 时序对齐已应用："
           grep -n 'hmt-timing-align' security/selinux/hooks.c | head -5
 
+      # ==================== BakaSU sync-up guard ====================
+      # sync-up(252b1520) 的 ksu_selinux_hide_enable() 里对
+      # selinux_hide_init_setxattr() 的调用漏了 #ifndef 保护；SUSFS manual hook
+      # 模式下会链接失败（undefined symbol）。构建时补上这层 guard。
+      - name: 修补 BakaSU sync-up 的 setxattr guard
+        if: ${{ inputs.clean_build != true && inputs.disable_bakasu != true && inputs.ksu_variant == 'BakaSU' }}
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/apply_syncup_setxattr_guard.py" \
+            "$KERNEL_ROOT/KernelSU/kernel/feature/selinux_hide.c"
       # ==================== hide_memory_traces ====================
       # 只改 procfs 的输出视图（pagemap 宣告文件页 / smaps 脏页迁移为 clean）。
       # 不改内存内容、不改 VMA 结构、不新增 Kconfig，也不写 defconfig。
@@ -1567,6 +1577,7 @@ jobs:
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
           EOF
 
       # ==================== 配置内核名称 ====================
