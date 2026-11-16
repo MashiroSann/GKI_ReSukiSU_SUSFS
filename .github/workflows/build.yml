@@ -1021,6 +1021,31 @@ jobs:
             echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG"
           fi
 
+      # ==================== SUSFS selinux_hide ====================
+      # 新版 SUSFS(784ac9e6+) 的 selinux_hide 依赖 KernelSU 在注入 sepolicy 时
+      # 把 type / 规则登记进 SUSFS 的 sus 注册表；本流程里 BakaSU 变体不会应用
+      # 10_enable_susfs_for_ksu.patch，因此这里补上打点，否则隐藏等于没开。
+      - name: 接入 SUSFS selinux_hide 的 sus 注册表
+        if: ${{ inputs.clean_build != true && inputs.disable_bakasu != true && inputs.enable_susfs && inputs.ksu_variant == 'BakaSU' && inputs.kernel_version == '5.10' }}
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/apply_susfs_sus_registry.py" \
+            "$KERNEL_ROOT/KernelSU/kernel/selinux/sepolicy.c"
+
+      # ==================== SELinux 时序对齐 ====================
+      # Duck Detector 1110 新增的 app_zygote attr/current 时序判据，利用
+      # SUSFS setprocattr 里 “A 走解析 / B 跳过解析” 的路径差；这里把前导
+      # 换行剥掉，让两类载荷走同一条解析路径。
+      - name: 对齐 SELinux setprocattr 时序
+        if: ${{ inputs.clean_build != true && inputs.disable_bakasu != true && inputs.enable_susfs && inputs.kernel_version == '5.10' && inputs.android_version == 'android12' }}
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/apply_selinux_timing_alignment.py" .
+          grep -q 'hmt-timing-align:begin' security/selinux/hooks.c
+          echo "SELinux setprocattr 时序对齐已应用："
+          grep -n 'hmt-timing-align' security/selinux/hooks.c | head -5
+
       # ==================== hide_memory_traces ====================
       # 只改 procfs 的输出视图（pagemap 宣告文件页 / smaps 脏页迁移为 clean）。
       # 不改内存内容、不改 VMA 结构、不新增 Kconfig，也不写 defconfig。
