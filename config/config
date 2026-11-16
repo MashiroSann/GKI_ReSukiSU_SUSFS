@@ -53,13 +53,18 @@ nomount=611f2420abfd49c716e7e1ca685a7b6143eb2cae
 # ==================== BakaSU 的 commit hash ====================
 # 仅当 custom=true 时生效；留空表示跟随 main 分支最新提交
 #
-# 548d1dd: 2026-11-09，main 最新。与 SUSFS 784ac9e6 的组合已验证可编译（11-15 构建）。
-#   注：BakaSU PR #662（sync-up 252b1520）虽然自带新版 SUSFS 的
-#   sepolicy 注册打点，但它同步的是 10-29 版 SUSFS 的内核侧接口，
-#   与 784ac9e6 组合会链接失败（undefined symbol: selinux_hide_init_setxattr），
-#   因此暂不采用；等该 PR 合并/上游适配 784ac9e6 后再切。
-#   sus 注册表打点由 scripts/apply_susfs_sus_registry.py 在构建时补上。
-bakasu=548d1dda060ca198823d8808804d01f5209ef4a9
+# 252b152: BakaSU PR #662「sync with upstream」分支 sync-up 的 head（2026-11-14）。
+#   选它的原因：自带新版 SUSFS 需要的 KernelSU 侧集成 ——
+#     kernel/selinux/sepolicy.c:   susfs_add_sus_type() / susfs_add_sus_avd_allowed_by_type()
+#     kernel/Kconfig:              config KSU_SUSFS_PRIORITY_UID_FILTER
+#     kernel/supercall/dispatch.c: CMD_SUSFS_SET_PRIORITY_UID_FILTER
+#   注意：其 head 提交 252b1520 有个漏保护 —— ksu_selinux_hide_enable() 里
+#   selinux_hide_init_setxattr() 的调用没被
+#   #ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE 包住，而函数定义被包住；
+#   配合 SUSFS manual hook 会链接失败（undefined symbol: selinux_hide_init_setxattr）。
+#   构建时由 scripts/apply_syncup_setxattr_guard.py 补上这层 guard。
+#   等 PR 合并 / 上游修复后，可移除该脚本并改回 main 的提交。
+bakasu=252b15203940c00570c65c0d33db12d9e76c4dff
 
 # ==================== SukiSU 的 commit hash ====================
 # 仅当 custom=true 且使用 SukiSU 变体时生效
