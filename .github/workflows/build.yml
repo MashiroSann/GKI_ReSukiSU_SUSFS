@@ -1046,6 +1046,18 @@ jobs:
           echo "SELinux setprocattr 时序对齐已应用："
           grep -n 'hmt-timing-align' security/selinux/hooks.c | head -5
 
+      # ==================== SELinux status 页同步 ====================
+      # 伪造的 /sys/fs/selinux/status 页是启动早期快照；策略被重载后
+      # sequence/policyload 会过期，Duck 的 DirtySepolicy 2.2 一致性检查
+      # 会把它和 /access 返回的 avd.seqno 判为矛盾（DirtySepolicy WARNING）。
+      # 这里在返回伪造页前用真实 status 页刷新计数，仅强制 enforcing=1。
+      - name: 同步 SELinux status 页计数
+        if: ${{ inputs.clean_build != true && inputs.disable_bakasu != true && inputs.enable_susfs && inputs.kernel_version == '5.10' }}
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/apply_fake_status_counters.py" .
+          grep -q 'hmt-fake-status-sync' security/selinux/selinuxfs.c
       # ==================== BakaSU sync-up guard ====================
       # sync-up(252b1520) 的 ksu_selinux_hide_enable() 里对
       # selinux_hide_init_setxattr() 的调用漏了 #ifndef 保护；SUSFS manual hook
