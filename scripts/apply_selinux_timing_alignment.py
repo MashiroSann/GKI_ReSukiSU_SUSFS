@@ -113,21 +113,30 @@ def main():
 
     patched = src[:abs_end] + "\n" + INSERT.rstrip("\n") + src[abs_end:]
 
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write(patched)
-
-    # 自检
-    with open(path, "r", encoding="utf-8") as f:
-        out = f.read()
+    # 自检：先在内存里校验，通过后再落盘，避免把半成品写进内核树
     for needle in (MARK_BEGIN, MARK_END,
                    "if (size && str[0] == '\\n')",
                    "if (size && str[0] && str[0] != '\\n')"):
-        if needle not in out:
+        if needle not in patched:
             fail("注入后自检失败，缺少：%s" % needle)
 
-    # 注入点必须在解析分支之前，否则等于没改
-    if out.find(MARK_BEGIN) > out.find("if (size && str[0] && str[0] != '\\n')"):
-        fail("注入位置异常：对齐代码落在了解析分支之后")
+    # 注入点必须落在“susfs_selinux_setprocattr 自己”的解析分支之前，否则等于没改。
+    # 注意：stock 的 selinux_setprocattr 里也有同样的解析分支，所以必须限定在函数体内比较。
+    m2 = re.search(re.escape(FUNC_SIG), patched)
+    if not m2:
+        fail("注入后自检失败：找不到 susfs_selinux_setprocattr()")
+    p_start = m2.start()
+    p_end = patched.find("\n}\n", p_start)
+    if p_end < 0:
+        fail("注入后自检失败：找不到 susfs_selinux_setprocattr() 的函数结尾")
+    fn = patched[p_start:p_end]
+    pos_mark = fn.find(MARK_BEGIN)
+    pos_parse = fn.find(r"if (size && str[0] && str[0] != '\n')")
+    if pos_mark < 0 or pos_parse < 0 or pos_mark > pos_parse:
+        fail("注入位置异常：对齐代码未落在 susfs_selinux_setprocattr 的解析分支之前")
+
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(patched)
 
     print("[timing-align] 注入完成：%s" % path)
     print("[timing-align]   susfs_selinux_setprocattr: 剥离前导换行，A/B 走同一解析路径")
