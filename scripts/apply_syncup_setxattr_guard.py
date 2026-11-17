@@ -13,9 +13,11 @@ BakaSU PR #662（sync-up）引入 `inode_setxattr` LSM hook 时，`selinux_hide_
 `#ifndef` 块内声明 → 接 SUSFS 时变成编译错误：
     error: use of undeclared identifier 'inode_doinit_with_dentry_fn'
 
-本脚本做自适应修补（两种布局都能处理）：
+本脚本做自适应修补（三种布局都能处理）：
 - 旧布局（如 252b1520）：定义已在 #ifndef 内，只需给「调用」加同样保护；
-- 新布局（a671d800+）：定义被挪到 #ifndef 外 → 给「定义」和「调用」都加保护。
+- 新布局（a671d800）：定义被挪到 #ifndef 外 → 给「定义」和「调用」都加保护；
+- 已修复布局（如 55f3dcb1 "test"，2026-11-16 22:21）：上游自己把「调用」移进了
+  #ifndef 块 → 定义和调用都已被保护，本脚本直接跳过（不注入、不报错）。
 
 `selinux_hide_init_setxattr()` 只服务于旧的 manual hook 实现；新 SUSFS 的隐藏由
 内核侧 security/selinux/* 完成，接 SUSFS 时这两块本来就不该参与编译。
@@ -104,12 +106,18 @@ def main():
     if def_idx is None or call_idx is None:
         fail("%s: 找不到 selinux_hide_init_setxattr 的定义或调用" % path)
 
+    def_guarded = guarded_before(lines, def_idx)
+    call_guarded = guarded_before(lines, call_idx)
+    if def_guarded and call_guarded:
+        print("[setxattr-guard] 定义与调用均已在 #ifndef 保护内（上游已修复布局），跳过：%s" % path)
+        return
+
     # 每一项：(行号, 要插入到该行之前的文本)
     ins = []
     added = 0
 
     # 1) 新布局：定义在 #ifndef 外 → 给定义加保护
-    if not guarded_before(lines, def_idx):
+    if not def_guarded:
         def_end = find_block_end(lines, def_idx)
         if def_end is None:
             fail("无法定位 selinux_hide_init_setxattr 定义结束行")
@@ -118,7 +126,7 @@ def main():
         added += 1
 
     # 2) 调用加保护
-    if not guarded_before(lines, call_idx):
+    if not call_guarded:
         if call_idx + 1 >= len(lines) or not re.match(r"^\s*if\s*\(ret\)\s*\{\s*$", lines[call_idx + 1]):
             fail("selinux_hide_init_setxattr() 调用后找不到 if (ret) { ... }")
         if_end = find_block_end(lines, call_idx + 1)
