@@ -1938,6 +1938,37 @@ jobs:
 #          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
 #          cp ./boot-lz4.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-lz4.img
 #
+      # ==================== 构建产物自检（可选功能标记） ====================
+      # 防回归：dispatch 漏传输入参数时，工作流会把对应步骤当“跳过”处理但构建仍然成功，
+      # 于是产出缺功能的内核（例如 NoMount / 内存视图补丁缺失）却照常上传。
+      # 这里在打包后检查 Image 里是否真的带上了对应标记，缺失就 fail。
+      - name: 构建产物自检（可选功能标记）
+        run: |
+          set -euo pipefail
+          IMG="$KERNEL_ROOT/common/arch/arm64/boot/Image"
+          if [ ! -f "$IMG" ]; then
+            echo "::error::找不到 $IMG"
+            exit 1
+          fi
+          MISSING=0
+          if [ "${{ inputs.use_nomount }}" = "true" ] && [ "${{ inputs.clean_build }}" != "true" ] && [ "${{ inputs.disable_bakasu }}" != "true" ]; then
+            if ! grep -aq "NoMount: Loaded successfully" "$IMG"; then
+              echo "::error::use_nomount=true 但 Image 中没有 NoMount 驱动标记（集成步骤被跳过？检查 dispatch 参数）"
+              MISSING=1
+            fi
+          fi
+          if [ "${{ inputs.hide_memory_traces }}" = "true" ] && [ "${{ inputs.clean_build }}" != "true" ] && [ "${{ inputs.disable_bakasu }}" != "true" ]; then
+            if ! grep -aq "/memfd:jit-cache (deleted)" "$IMG"; then
+              echo "::error::hide_memory_traces=true 但 Image 中没有内存视图补丁标记（补丁步骤被跳过？检查 dispatch 参数）"
+              MISSING=1
+            fi
+          fi
+          if [ "$MISSING" = "1" ]; then
+            echo "::error::可选功能标记自检失败：请检查 dispatch 参数是否传全"
+            exit 1
+          fi
+          echo "可选功能标记自检通过"
+
       # ==================== 收集补丁冲突文件 ====================
       # 收集所有 .rej 文件用于调试补丁失败问题
       - name: 收集补丁冲突文件
